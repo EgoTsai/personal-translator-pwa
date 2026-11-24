@@ -2,7 +2,7 @@
  * app.js — Main UI controller for 隨身口譯官 PWA
  */
 
-import { AudioEngine } from './audio.js';
+import { AudioEngine } from './audio.js?v=2.2';
 import {
   TARGET_LANGUAGES,
   ICEBREAKER_BANNERS,
@@ -11,7 +11,8 @@ import {
   translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
-} from './gemini.js';
+} from './gemini.js?v=2.2';
+import { GeminiLiveClient } from './live.js?v=2.2';
 
 const STORAGE_KEYS = {
   settings: 'pt_settings_v1',
@@ -22,12 +23,15 @@ const STORAGE_KEYS = {
 const DEFAULT_SETTINGS = {
   apiKey: '',
   model: 'gemini-3.5-flash-lite',
+  liveModel: 'gemini-3.8-live',
   ttsModel: 'gemini-3.8-flash-lite-tts',
   voiceName: 'Kore',
   tone: 'natural',
-  silenceMs: 1300,
+  silenceMs: 850,
   vadThreshold: 0.018,
   showOriginal: true,
+  draftCaption: true,
+  liveAutoSpeak: false,
   targetLang: 'en',
   autoTts: false,
   theme: 'light',
@@ -59,18 +63,35 @@ let messages = loadJson(STORAGE_KEYS.messages, []);
 let speakerMemory = loadJson(STORAGE_KEYS.speakers, {}); // { A: { voiceHint, customName } }
 
 let isListening = false;
+let isLiveMode = false; // Always defaults to Plan A (false) on launch to protect credits
+let liveConnected = false;
+let liveConnecting = false;
+let liveStartTs = 0;
+let liveTimerHandle = null;
+let liveIdleHandle = null;
+let liveInboundCount = 0;
 let isManualRecording = false;
 let manualTimerHandle = null;
 let manualStartTime = 0;
 
-// Sequential queue for VAD segments so speaker continuity stays ordered
+// Sequential queue for Plan A VAD segments so speaker continuity stays ordered
 const vadQueue = [];
 let vadProcessing = false;
 let pendingCount = 0;
 let activeShowcardMsg = null;
 let wakeLockSentinel = null;
 
+// Free browser live draft caption (SpeechRecognition)
+let draftRecognition = null;
+let draftRecognitionActive = false;
+let draftRecognitionDisabled = false;
+let currentDraftText = '';
+
+// Active live streaming preview data (rendered in-place without rebuilding feed)
+let activeStreamState = null;
+
 const audio = new AudioEngine();
+const liveClient = new GeminiLiveClient();
 
 // Subtle mobile haptic feedback (safe no-op on unsupported devices)
 function haptic(pattern = 12) {
@@ -121,7 +142,10 @@ const els = {
   langBar: $('langBar'),
   listenSwitch: $('listenSwitch'),
   listenSub: $('listenSub'),
+  liveModeSwitch: $('liveModeSwitch'),
+  liveModeSub: $('liveModeSub'),
   listenStrip: $('listenStrip'),
+  liveTimerPill: $('liveTimerPill'),
   waveBars: $('waveBars'),
   vadStatus: $('vadStatus'),
   flushBtn: $('flushBtn'),
@@ -148,12 +172,15 @@ const els = {
   testKeyBtn: $('testKeyBtn'),
   testResult: $('testResult'),
   modelSelect: $('modelSelect'),
+  liveModelSelect: $('liveModelSelect'),
   ttsModelSelect: $('ttsModelSelect'),
   voiceSelect: $('voiceSelect'),
   testVoiceBtn: $('testVoiceBtn'),
   toneSelect: $('toneSelect'),
   silenceSelect: $('silenceSelect'),
   vadThresholdSelect: $('vadThresholdSelect'),
+  draftCaptionCheck: $('draftCaptionCheck'),
+  liveAutoSpeakCheck: $('liveAutoSpeakCheck'),
   showOriginalCheck: $('showOriginalCheck'),
   saveSettingsBtn: $('saveSettingsBtn'),
 
@@ -246,28 +273,67 @@ function updateHeaderStatus() {
     els.statusText.textContent = '正在收錄語音⋯';
     return;
   }
+  if (isListening && isLiveMode) {
+    if (liveConnecting) {
+      els.statusDot.classList.add('processing');
+      els.statusText.textContent = '⚡ Live 串流連線中⋯';
+    } else if (liveConnected) {
+      els.statusDot.classList.add('live-ws');
+      els.statusText.textContent = '⚡ Live 雙向串流中・螢幕恆亮';
+    } else {
+      els.statusDot.classList.add('processing');
+      els.statusText.textContent = '⚡ Live 準備中⋯';
+    }
+    return;
+  }
   if (pendingCount > 0) {
     els.statusDot.classList.add('processing');
-    els.statusText.textContent = `Gemini 翻譯辨識中 (${pendingCount})⋯`;
+    els.statusText.textContent = `Gemini 串流翻譯中 (${pendingCount})⋯`;
     return;
   }
   if (isListening) {
     els.statusDot.classList.add('listening');
-    els.statusText.textContent = '即時聆聽中・螢幕恆亮';
+    els.statusText.textContent = '極速聆聽中・螢幕恆亮';
     return;
   }
   els.statusDot.classList.add('ready');
-  els.statusText.textContent = settings.apiKey ? '已連線・待命中' : '尚未設定 API Key';
+  els.statusText.textContent = settings.apiKey ? '已連線・待命中（極速方案 A）' : '尚未設定 API Key';
 }
 
 function updateSwitchUI() {
-  // Single Listening Switch
+  // Listening Master Switch
   els.listenSwitch.classList.toggle('listen-on', isListening);
   els.listenSwitch.setAttribute('aria-checked', String(isListening));
   els.listenSub.textContent = isListening
-    ? '聆聽中・外語翻中文／中文直出（防休眠恆亮）'
-    : '外語自動翻中文・中文直接印出（防休眠恆亮）';
+    ? (isLiveMode ? 'Live 雙向口譯中' : '極速聆聽中・防休眠')
+    : '極速串流・防休眠';
+
+  // Live Streaming Mode Switch
+  if (els.liveModeSwitch) {
+    els.liveModeSwitch.classList.toggle('live-on', isLiveMode);
+    els.liveModeSwitch.setAttribute('aria-checked', String(isLiveMode));
+  }
+  if (els.liveModeSub) {
+    if (!isLiveMode) {
+      els.liveModeSub.textContent = '關閉（極速省額度）';
+    } else if (liveConnecting) {
+      els.liveModeSub.textContent = '正在建立連線⋯';
+    } else if (isListening && liveConnected) {
+      els.liveModeSub.textContent = '超低延遲連線中';
+    } else {
+      els.liveModeSub.textContent = '已待機（未計費）';
+    }
+  }
+
+  // Listening Strip
   els.listenStrip.classList.toggle('visible', isListening);
+  els.listenStrip.classList.toggle('live-mode', isListening && isLiveMode);
+  if (els.liveTimerPill) {
+    els.liveTimerPill.classList.toggle('hidden', !(isListening && isLiveMode && liveConnected));
+  }
+  if (els.flushBtn) {
+    els.flushBtn.textContent = isListening && isLiveMode ? '送出此句' : '立即送出';
+  }
 
   // Tone Quick Chip
   if (els.toneQuickBtn) {
@@ -308,12 +374,131 @@ function displaySpeakerName(speakerCode, isOutbound) {
   return speakerCode;
 }
 
+function buildDraftCaptionElement(text) {
+  const el = document.createElement('div');
+  el.id = 'liveDraftCard';
+  el.className = 'draft-caption-card';
+  const badge = document.createElement('span');
+  badge.className = 'draft-caption-badge';
+  badge.textContent = '即時聽寫';
+  const span = document.createElement('span');
+  span.className = 'draft-caption-text';
+  span.textContent = text;
+  el.append(badge, span);
+  return el;
+}
+
+function upsertDraftCaptionDom(text) {
+  currentDraftText = (text || '').trim();
+  const feed = els.transcriptFeed;
+  const existing = document.getElementById('liveDraftCard');
+
+  if (!currentDraftText) {
+    if (existing) existing.remove();
+    return;
+  }
+
+  if (els.emptyState && els.emptyState.parentNode === feed) {
+    els.emptyState.remove();
+  }
+
+  if (existing) {
+    const span = existing.querySelector('.draft-caption-text');
+    if (span) span.textContent = currentDraftText;
+  } else {
+    feed.appendChild(buildDraftCaptionElement(currentDraftText));
+  }
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function buildStreamingCardElement(data) {
+  const isOut = data.direction === 'outbound';
+  const spClass = data.isLive ? 'sp-c' : speakerColorClass(data.speaker || 'A', isOut);
+  const card = document.createElement('article');
+  card.id = 'liveStreamingCard';
+  card.className = `utterance-card streaming ${isOut ? 'outbound' : `card-${spClass}`}${data.isLive ? ' live-stream-card' : ''}`;
+
+  const top = document.createElement('div');
+  top.className = 'utterance-top';
+  const spGroup = document.createElement('div');
+  spGroup.className = 'speaker-group';
+
+  const badge = document.createElement('span');
+  badge.className = `speaker-badge ${spClass}`;
+  badge.textContent = data.isLive ? '⚡ LIVE' : isOut ? '我:' : (data.speaker === '譯' ? '譯' : `${displaySpeakerName(data.speaker || 'A', false)}:`);
+
+  const tag = document.createElement('span');
+  tag.className = 'lang-tag';
+  tag.textContent = data.isLive ? '即時串流翻譯中⋯' : '串流輸出中⋯';
+
+  spGroup.append(badge, tag);
+  top.appendChild(spGroup);
+  card.appendChild(top);
+
+  const mainEl = document.createElement('div');
+  mainEl.className = 'utterance-main';
+  const textNode = document.createElement('span');
+  textNode.className = 'stream-main-text';
+  textNode.textContent = data.mainText || '';
+  const cursor = document.createElement('span');
+  cursor.className = 'stream-cursor';
+  mainEl.append(textNode, cursor);
+  card.appendChild(mainEl);
+
+  if (data.reading) {
+    const readEl = document.createElement('div');
+    readEl.className = 'utterance-reading';
+    readEl.textContent = data.reading;
+    card.appendChild(readEl);
+  }
+
+  if (data.subText) {
+    const subEl = document.createElement('div');
+    subEl.className = 'utterance-sub';
+    subEl.textContent = data.subText;
+    card.appendChild(subEl);
+  }
+
+  return card;
+}
+
+function upsertStreamingCardDom(data) {
+  activeStreamState = data;
+  const feed = els.transcriptFeed;
+  if (!data || (!data.mainText && !data.subText)) {
+    clearStreamingCardDom();
+    return;
+  }
+
+  if (els.emptyState && els.emptyState.parentNode === feed) {
+    els.emptyState.remove();
+  }
+
+  // Hide generic spinner pill once actual streaming tokens are visible
+  const pendingPill = feed.querySelector('.pending-pill');
+  if (pendingPill) pendingPill.remove();
+
+  const existing = document.getElementById('liveStreamingCard');
+  const nextCard = buildStreamingCardElement(data);
+  if (existing) {
+    existing.replaceWith(nextCard);
+  } else {
+    feed.appendChild(nextCard);
+  }
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function clearStreamingCardDom() {
+  activeStreamState = null;
+  const existing = document.getElementById('liveStreamingCard');
+  if (existing) existing.remove();
+}
+
 function renderFeed() {
-  // Preserve pending pill if any
   const feed = els.transcriptFeed;
   feed.innerHTML = '';
 
-  if (messages.length === 0) {
+  if (messages.length === 0 && !activeStreamState && !currentDraftText) {
     feed.appendChild(els.emptyState);
   } else {
     for (const msg of messages) {
@@ -321,10 +506,16 @@ function renderFeed() {
     }
   }
 
-  if (pendingCount > 0) {
+  if (currentDraftText) {
+    feed.appendChild(buildDraftCaptionElement(currentDraftText));
+  }
+
+  if (activeStreamState && (activeStreamState.mainText || activeStreamState.subText)) {
+    feed.appendChild(buildStreamingCardElement(activeStreamState));
+  } else if (pendingCount > 0) {
     const pill = document.createElement('div');
     pill.className = 'pending-pill';
-    pill.innerHTML = `<span class="spinner"></span><span>Gemini 辨識翻譯中⋯</span>`;
+    pill.innerHTML = `<span class="spinner"></span><span>Gemini 極速翻譯中⋯</span>`;
     feed.appendChild(pill);
   }
 
@@ -673,7 +864,353 @@ async function speakMessage(msgOrId, text, langCode) {
   }
 }
 
-// Listening Switch (with Screen Wake Lock + haptic)
+// Free Browser SpeechRecognition Live Draft Preview (Plan A — zero API cost, graceful fallback)
+const DRAFT_LOCALE_MAP = {
+  en: 'en-US',
+  ja: 'ja-JP',
+  sv: 'sv-SE',
+  zh: 'zh-TW',
+};
+
+function startDraftRecognition(langCode = 'zh') {
+  if (!settings.draftCaption || draftRecognitionDisabled || isLiveMode) return;
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRec) return;
+
+  stopDraftRecognition(false);
+  try {
+    const rec = new SpeechRec();
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+    rec.lang = DRAFT_LOCALE_MAP[langCode] || 'zh-TW';
+
+    rec.onresult = (event) => {
+      if (!draftRecognitionActive) return;
+      let combined = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i]?.[0]?.transcript || '';
+        combined += transcript;
+      }
+      if (combined.trim()) {
+        upsertDraftCaptionDom(combined.trim());
+      }
+    };
+
+    rec.onerror = (event) => {
+      // On iOS Safari or devices that disallow concurrent WebAudio + SpeechRecognition,
+      // silently disable draft preview without ever affecting WebAudio recording.
+      const code = event?.error || '';
+      if (code === 'not-allowed' || code === 'service-not-allowed' || code === 'audio-capture') {
+        draftRecognitionDisabled = true;
+      }
+      draftRecognitionActive = false;
+    };
+
+    rec.onend = () => {
+      if (draftRecognitionActive && !draftRecognitionDisabled && (isListening || isManualRecording) && !isLiveMode) {
+        try {
+          rec.start();
+        } catch (_) {
+          draftRecognitionActive = false;
+        }
+      }
+    };
+
+    draftRecognition = rec;
+    draftRecognitionActive = true;
+    rec.start();
+  } catch (_) {
+    draftRecognitionActive = false;
+  }
+}
+
+function stopDraftRecognition(clearText = true) {
+  draftRecognitionActive = false;
+  if (draftRecognition) {
+    try {
+      draftRecognition.onresult = null;
+      draftRecognition.onerror = null;
+      draftRecognition.onend = null;
+      draftRecognition.stop();
+    } catch (_) {}
+    draftRecognition = null;
+  }
+  if (clearText) {
+    upsertDraftCaptionDom('');
+  }
+}
+
+// Language heuristic helpers for Gemini Live turns
+function isLikelyChineseText(text) {
+  if (!text) return false;
+  if (/[\u3040-\u30ff]/.test(text)) return false; // Japanese Kana -> not Chinese
+  return /[\u4e00-\u9fff]/.test(text);
+}
+
+function detectRoughForeignLang(text, fallback = 'en') {
+  if (!text) return fallback;
+  if (/[\u3040-\u30ff]/.test(text)) return 'ja';
+  if (/[åäöÅÄÖ]/.test(text)) return 'sv';
+  if (isLikelyChineseText(text)) return 'zh';
+  return fallback || 'en';
+}
+
+function formatTimerMMSS(ms) {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  const m = String(Math.floor(sec / 60)).padStart(2, '0');
+  const s = String(sec % 60).padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+function stopLiveTimers() {
+  if (liveTimerHandle) {
+    clearInterval(liveTimerHandle);
+    liveTimerHandle = null;
+  }
+  if (liveIdleHandle) {
+    clearInterval(liveIdleHandle);
+    liveIdleHandle = null;
+  }
+}
+
+function startLiveTimers() {
+  stopLiveTimers();
+  liveStartTs = Date.now();
+  if (els.liveTimerPill) {
+    els.liveTimerPill.textContent = '⚡ LIVE 00:00';
+  }
+  liveTimerHandle = setInterval(() => {
+    if (liveConnected && els.liveTimerPill) {
+      els.liveTimerPill.textContent = `⚡ LIVE ${formatTimerMMSS(Date.now() - liveStartTs)}`;
+    }
+  }, 1000);
+
+  // Guardrail: auto-disconnect after 5 minutes of total silence so credits are never burned accidentally
+  liveIdleHandle = setInterval(() => {
+    if (!liveConnected || !liveClient.lastActivityTs) return;
+    if (Date.now() - liveClient.lastActivityTs >= 5 * 60 * 1000) {
+      stopLiveSession(true);
+      isListening = false;
+      syncWakeLock();
+      updateSwitchUI();
+      showToast('Live 串流已靜音 5 分鐘，自動斷線以節省額度', 4200);
+    }
+  }, 15000);
+}
+
+// Wire Gemini Live Client callbacks once
+liveClient.onStateChange = (state, detail) => {
+  if (state === 'connecting') {
+    liveConnecting = true;
+    liveConnected = false;
+    updateSwitchUI();
+  } else if (state === 'ready') {
+    liveConnecting = false;
+    liveConnected = true;
+    startLiveTimers();
+    els.vadStatus.textContent = '⚡ Live 雙向串流已連線・直接開口即可即時翻譯';
+    updateSwitchUI();
+  } else if (state === 'closed') {
+    const wasActive = liveConnected;
+    liveConnecting = false;
+    liveConnected = false;
+    stopLiveTimers();
+    clearStreamingCardDom();
+    if (wasActive && isListening && isLiveMode) {
+      audio.stopLiveStream();
+      isListening = false;
+      syncWakeLock();
+      showToast(`Live 連線已關閉${detail || ''}`, 3200);
+    }
+    updateSwitchUI();
+  } else if (state === 'error') {
+    liveConnecting = false;
+    liveConnected = false;
+    stopLiveTimers();
+    clearStreamingCardDom();
+    audio.stopLiveStream();
+    if (detail) showToast(detail, 4200);
+    updateSwitchUI();
+  }
+};
+
+liveClient.onPartialUpdate = ({ inputText, outputText }) => {
+  if (!inputText && !outputText) return;
+  const mainIsOut = outputText ? !isLikelyChineseText(outputText) : isLikelyChineseText(inputText);
+  upsertStreamingCardDom({
+    isLive: true,
+    direction: mainIsOut ? 'outbound' : 'inbound',
+    speaker: mainIsOut ? '我' : 'A',
+    mainText: outputText || inputText,
+    subText: outputText && inputText && outputText !== inputText ? (mainIsOut ? `原話：${inputText}` : inputText) : '',
+  });
+};
+
+liveClient.onAudioChunk = (bytes, sampleRate) => {
+  if (settings.liveAutoSpeak) {
+    audio.enqueueLiveAudioChunk(bytes, sampleRate).catch(() => {});
+  }
+};
+
+liveClient.onTurnComplete = async ({ inputText, outputText, pcmChunks, sampleRate }) => {
+  clearStreamingCardDom();
+  const cleanOut = (outputText || '').trim();
+  const cleanIn = (inputText || '').trim();
+  if (!cleanOut && !cleanIn) return;
+
+  const outIsZh = isLikelyChineseText(cleanOut);
+  let msg;
+  if (outIsZh || !cleanOut) {
+    // Foreign -> Chinese (inbound left card)
+    const speakers = ['A', 'B'];
+    const spCode = speakers[liveInboundCount % speakers.length];
+    liveInboundCount += 1;
+    const detectedLang = detectRoughForeignLang(cleanIn, settings.targetLang);
+    msg = {
+      id: makeId(),
+      direction: 'inbound',
+      speaker: spCode,
+      lang: detectedLang,
+      isChinese: detectedLang === 'zh',
+      original: cleanIn || cleanOut,
+      zh: cleanOut || cleanIn,
+      time: nowTimeStr(),
+    };
+  } else {
+    // Chinese -> Foreign (outbound right card)
+    msg = {
+      id: makeId(),
+      direction: 'outbound',
+      speaker: '我',
+      lang: 'zh',
+      targetLang: settings.targetLang,
+      isChinese: true,
+      zh: cleanIn,
+      translated: cleanOut,
+      reading: '',
+      time: nowTimeStr(),
+    };
+  }
+
+  // Cache returned 24kHz PCM directly under msg.id so tapping 🔊 plays with 0ms latency & 0 extra TTS cost!
+  if (Array.isArray(pcmChunks) && pcmChunks.length > 0) {
+    try {
+      const audioBuffer = await audio.pcmChunksToAudioBuffer(pcmChunks, sampleRate || 24000);
+      if (audioBuffer) audio.cacheAudioBuffer(msg.id, audioBuffer);
+    } catch (_) {}
+  }
+
+  messages.push(msg);
+  saveState();
+  renderFeed();
+  updateHeaderStatus();
+};
+
+liveClient.onGoAway = () => {
+  if (isListening && isLiveMode) {
+    showToast('Live 連線即將到期，自動重新連線中⋯', 2500);
+    startLiveSession().catch(() => {});
+  }
+};
+
+async function startLiveSession() {
+  stopDraftRecognition(true);
+  audio.stopListening();
+  liveConnecting = true;
+  updateSwitchUI();
+
+  try {
+    await audio.ensureMicrophone();
+    await liveClient.connect({
+      apiKey: settings.apiKey,
+      model: settings.liveModel || 'gemini-3.8-live',
+      targetLang: settings.targetLang,
+      tone: settings.tone,
+      voiceName: settings.voiceName,
+    });
+    await audio.startLiveStream((pcm16) => {
+      liveClient.sendAudioPcm16k(pcm16);
+    });
+  } catch (err) {
+    liveConnecting = false;
+    liveConnected = false;
+    audio.stopLiveStream();
+    liveClient.disconnect();
+    throw err;
+  }
+}
+
+function stopLiveSession(releaseMic = true) {
+  stopLiveTimers();
+  liveConnecting = false;
+  liveConnected = false;
+  clearStreamingCardDom();
+  liveClient.disconnect();
+  if (releaseMic) {
+    audio.stopLiveStream();
+  } else {
+    audio.liveStreaming = false;
+    audio.onLivePcmChunk = null;
+    audio.stopLivePlayback();
+  }
+}
+
+// Live Mode Switch (Default OFF = Plan A; ON = Gemini Live WebSocket)
+async function toggleLiveMode() {
+  if (!isLiveMode) {
+    if (!settings.apiKey) {
+      showToast('請先填入 Gemini API Key 才能使用 Live 串流模式');
+      openSettings();
+      return;
+    }
+    isLiveMode = true;
+    haptic(15);
+    // 1-tap Live start: automatically engage Listening & connect WebSocket immediately!
+    isListening = true;
+    syncWakeLock();
+    updateSwitchUI();
+    showToast('⚡ 正在連線 Gemini Live 超低延遲串流⋯', 2200);
+    try {
+      await startLiveSession();
+      showToast('⚡ Live 雙向串流已就緒（點 🔊 可 0 秒重播）');
+    } catch (err) {
+      console.error('Live start error:', err);
+      isLiveMode = false;
+      isListening = false;
+      syncWakeLock();
+      updateSwitchUI();
+      showToast(err.message || 'Live 連線失敗，已切回方案 A', 4000);
+    }
+  } else {
+    isLiveMode = false;
+    haptic(10);
+    if (isListening) {
+      stopLiveSession(false);
+      try {
+        audio.configureVad({
+          threshold: Number(settings.vadThreshold),
+          silenceMs: Number(settings.silenceMs),
+        });
+        await audio.startListening();
+        startDraftRecognition(settings.targetLang);
+        els.vadStatus.textContent = '極速聆聽中⋯停頓 0.85 秒自動串流翻譯';
+        showToast('已切回標準串流（方案 A・省額度）');
+      } catch (err) {
+        isListening = false;
+        audio.stopListening();
+        showToast(`切回失敗：${err.message}`, 3500);
+      }
+    } else {
+      stopLiveSession(true);
+      showToast('已關閉 Live 串流模式（預設方案 A）');
+    }
+    syncWakeLock();
+    updateSwitchUI();
+  }
+}
+
+// Listening Switch (with Screen Wake Lock + haptic — uses Plan A by default, or Live when toggled ON)
 async function toggleListening() {
   if (!isListening) {
     if (!settings.apiKey) {
@@ -682,22 +1219,41 @@ async function toggleListening() {
       return;
     }
     try {
-      audio.configureVad({
-        threshold: Number(settings.vadThreshold),
-        silenceMs: Number(settings.silenceMs),
-      });
-      await audio.startListening();
-      isListening = true;
-      haptic(15);
-      syncWakeLock();
-      updateSwitchUI();
-      showToast('即時聆聽已開啟（螢幕自動防休眠）');
+      if (isLiveMode) {
+        isListening = true;
+        haptic(15);
+        syncWakeLock();
+        updateSwitchUI();
+        await startLiveSession();
+        showToast('⚡ Live 雙向串流已開啟（螢幕自動防休眠）');
+      } else {
+        audio.configureVad({
+          threshold: Number(settings.vadThreshold),
+          silenceMs: Number(settings.silenceMs),
+        });
+        await audio.startListening();
+        isListening = true;
+        startDraftRecognition(settings.targetLang);
+        haptic(15);
+        syncWakeLock();
+        updateSwitchUI();
+        els.vadStatus.textContent = '極速聆聽中⋯停頓即串流翻譯';
+        showToast('即時聆聽已開啟（方案 A 極速串流・防休眠）');
+      }
     } catch (err) {
       console.error(err);
-      showToast(`無法啟動麥克風：${err.message}`, 3600);
+      isListening = false;
+      syncWakeLock();
+      updateSwitchUI();
+      showToast(`無法啟動聆聽：${err.message}`, 3800);
     }
   } else {
-    audio.stopListening();
+    if (isLiveMode) {
+      stopLiveSession(true);
+    } else {
+      stopDraftRecognition(true);
+      audio.stopListening();
+    }
     isListening = false;
     haptic(10);
     syncWakeLock();
@@ -707,6 +1263,7 @@ async function toggleListening() {
 }
 
 function enqueueVadSegment(wav) {
+  upsertDraftCaptionDom('');
   vadQueue.push(wav);
   pendingCount += 1;
   renderFeed();
@@ -729,8 +1286,13 @@ async function processVadQueue() {
         preferredLang: settings.targetLang,
         speakerMemory,
         recentContext: messages.slice(-6),
+        onStream: (chunk) => {
+          upsertDraftCaptionDom('');
+          upsertStreamingCardDom(chunk);
+        },
       });
 
+      clearStreamingCardDom();
       const newlyAdded = [];
       for (const u of utterances) {
         if (!speakerMemory[u.speaker]) {
@@ -757,6 +1319,7 @@ async function processVadQueue() {
         saveState();
       }
     } catch (err) {
+      clearStreamingCardDom();
       console.error('VAD interpret error:', err);
       showToast(err.message, 3800);
     } finally {
@@ -790,6 +1353,7 @@ async function beginManualRecording() {
     speakStarting = false;
     isManualRecording = true;
     manualStartTime = Date.now();
+    startDraftRecognition('zh');
     haptic(15);
     syncWakeLock();
     els.speakChineseBtn.classList.add('recording');
@@ -819,6 +1383,10 @@ async function finishManualRecording() {
   manualTimerHandle = null;
   isManualRecording = false;
   speakHoldMode = false;
+  stopDraftRecognition(true);
+  if (isListening && !isLiveMode) {
+    startDraftRecognition(settings.targetLang);
+  }
   haptic([12, 35, 18]);
   syncWakeLock();
   els.speakChineseBtn.classList.remove('recording');
@@ -893,6 +1461,10 @@ function cancelManualChineseSpeak() {
   clearInterval(manualTimerHandle);
   manualTimerHandle = null;
   isManualRecording = false;
+  stopDraftRecognition(true);
+  if (isListening && !isLiveMode) {
+    startDraftRecognition(settings.targetLang);
+  }
   audio.cancelManualCapture();
   haptic(10);
   syncWakeLock();
@@ -955,7 +1527,13 @@ async function runOutboundTranslation({ wav = null, textInput = null }) {
       mimeType: wav ? wav.mimeType : 'audio/wav',
       textInput,
       recentContext: messages.slice(-6),
+      onStream: (chunk) => {
+        upsertDraftCaptionDom('');
+        upsertStreamingCardDom(chunk);
+      },
     });
+
+    clearStreamingCardDom();
 
     if (!result) {
       showToast('沒有辨識到清晰的語音或文字，請再試一次');
@@ -989,6 +1567,7 @@ async function runOutboundTranslation({ wav = null, textInput = null }) {
     messages.push(msg);
     saveState();
   } catch (err) {
+    clearStreamingCardDom();
     console.error('Outbound translate error:', err);
     showToast(err.message, 3800);
   } finally {
@@ -1126,11 +1705,18 @@ function closeShowcard() {
 function openSettings() {
   els.apiKeyInput.value = settings.apiKey;
   els.modelSelect.value = settings.model;
+  if (els.liveModelSelect) {
+    els.liveModelSelect.value = settings.liveModel || 'gemini-3.8-live';
+  }
   els.ttsModelSelect.value = settings.ttsModel;
   els.voiceSelect.value = settings.voiceName;
   els.toneSelect.value = settings.tone;
-  els.silenceSelect.value = String(settings.silenceMs);
+  const validSilences = ['650', '850', '1300', '1800'];
+  const silStr = validSilences.includes(String(settings.silenceMs)) ? String(settings.silenceMs) : '850';
+  els.silenceSelect.value = silStr;
   els.vadThresholdSelect.value = String(settings.vadThreshold);
+  if (els.draftCaptionCheck) els.draftCaptionCheck.checked = Boolean(settings.draftCaption);
+  if (els.liveAutoSpeakCheck) els.liveAutoSpeakCheck.checked = Boolean(settings.liveAutoSpeak);
   els.showOriginalCheck.checked = settings.showOriginal;
   els.testResult.textContent = '';
   els.testResult.className = 'test-result';
@@ -1146,14 +1732,19 @@ function closeSettings() {
 function saveSettingsFromForm() {
   const prevTts = settings.ttsModel;
   const prevVoice = settings.voiceName;
+  const prevLiveModel = settings.liveModel;
+  const prevTone = settings.tone;
 
   settings.apiKey = els.apiKeyInput.value.trim();
   settings.model = els.modelSelect.value;
+  if (els.liveModelSelect) settings.liveModel = els.liveModelSelect.value;
   settings.ttsModel = els.ttsModelSelect.value;
   settings.voiceName = els.voiceSelect.value;
   settings.tone = els.toneSelect.value;
   settings.silenceMs = Number(els.silenceSelect.value);
   settings.vadThreshold = Number(els.vadThresholdSelect.value);
+  if (els.draftCaptionCheck) settings.draftCaption = els.draftCaptionCheck.checked;
+  if (els.liveAutoSpeakCheck) settings.liveAutoSpeak = els.liveAutoSpeakCheck.checked;
   settings.showOriginal = els.showOriginalCheck.checked;
 
   if (prevTts !== settings.ttsModel || prevVoice !== settings.voiceName) {
@@ -1164,6 +1755,22 @@ function saveSettingsFromForm() {
     threshold: settings.vadThreshold,
     silenceMs: settings.silenceMs,
   });
+
+  if (!settings.draftCaption) {
+    stopDraftRecognition(true);
+  } else if (isListening && !isLiveMode) {
+    startDraftRecognition(settings.targetLang);
+  }
+
+  // If Live session is active and Live model / voice / tone changed, reconnect smoothly
+  if (
+    isListening &&
+    isLiveMode &&
+    liveConnected &&
+    (prevLiveModel !== settings.liveModel || prevVoice !== settings.voiceName || prevTone !== settings.tone)
+  ) {
+    startLiveSession().catch((err) => showToast(`重新連線 Live 失敗：${err.message}`, 3500));
+  }
 
   saveState();
   applyTheme();
@@ -1302,9 +1909,10 @@ audio.onLevel = (rms, mode) => {
 };
 
 audio.onVadStateChange = (speaking) => {
+  if (isLiveMode) return;
   els.vadStatus.textContent = speaking
-    ? '偵測到人聲，收音中⋯停頓後將自動翻譯'
-    : '聆聽環境聲音中⋯停頓會自動翻譯';
+    ? '偵測到人聲，收音中⋯停頓後將極速串流翻譯'
+    : '極速聆聽中⋯停頓即串流翻譯';
 };
 
 audio.onVadSegment = (wav) => {
@@ -1318,6 +1926,9 @@ audio.onPlaybackChange = () => {
 
 // Event Wiring
 els.listenSwitch.addEventListener('click', toggleListening);
+if (els.liveModeSwitch) {
+  els.liveModeSwitch.addEventListener('click', toggleLiveMode);
+}
 
 if (els.toneQuickBtn) {
   els.toneQuickBtn.addEventListener('click', () => {
@@ -1327,22 +1938,45 @@ if (els.toneQuickBtn) {
     saveState();
     updateSwitchUI();
     showToast((TONE_META[settings.tone] || TONE_META.natural).toast, 2200);
+    if (isListening && isLiveMode && liveConnected) {
+      startLiveSession().catch(() => {});
+    }
   });
 }
 
 els.langBar.addEventListener('click', (e) => {
   const pill = e.target.closest('.lang-pill');
   if (!pill) return;
+  const changed = settings.targetLang !== pill.dataset.lang;
   settings.targetLang = pill.dataset.lang;
   haptic(8);
   saveState();
   updateSwitchUI();
+  if (changed && isListening) {
+    if (isLiveMode && liveConnected) {
+      showToast(`Live 串流切換語言為「${(TARGET_LANGUAGES[settings.targetLang] || TARGET_LANGUAGES.en).label}」⋯`, 2000);
+      startLiveSession().catch(() => {});
+    } else if (!isLiveMode) {
+      startDraftRecognition(settings.targetLang);
+    }
+  }
 });
 
 els.flushBtn.addEventListener('click', () => {
+  if (isListening && isLiveMode) {
+    const ok = liveClient.flushAudioStream();
+    showToast(ok ? '已送出目前語音片段' : 'Live 尚未連線就緒');
+    return;
+  }
   const flushed = audio.flushListeningNow();
   if (!flushed) {
     showToast('目前沒有待送出的語音片段');
+  }
+});
+
+window.addEventListener('beforeunload', () => {
+  if (liveConnected || liveConnecting) {
+    stopLiveSession(true);
   }
 });
 

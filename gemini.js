@@ -95,6 +95,126 @@ async function postGenerateContent(apiKey, model, payload, signal) {
   return resp.json();
 }
 
+async function postStreamGenerateContent(apiKey, model, payload, onPartialText, signal) {
+  if (!apiKey || !apiKey.trim()) {
+    throw new Error('尚未設定 Gemini API Key，請點右上角「設定」填入。');
+  }
+
+  const url = `${API_BASE}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey.trim(),
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw friendlyApiError(resp.status, text);
+  }
+
+  if (!resp.body || !resp.body.getReader) {
+    const data = await resp.json();
+    const txt = extractTextPart(data);
+    if (onPartialText && txt) onPartialText(txt);
+    return txt;
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let sseBuffer = '';
+  let fullText = '';
+
+  const processLine = (line) => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('data:')) return;
+    const jsonStr = trimmed.slice(5).trim();
+    if (!jsonStr || jsonStr === '[DONE]') return;
+    try {
+      const chunk = JSON.parse(jsonStr);
+      const parts = chunk?.candidates?.[0]?.content?.parts || [];
+      let delta = '';
+      for (const p of parts) {
+        if (typeof p.text === 'string' && !p.thought) {
+          delta += p.text;
+        }
+      }
+      if (delta) {
+        fullText += delta;
+        if (onPartialText) onPartialText(fullText);
+      }
+    } catch (_) {
+      // Ignore partial / heartbeat SSE data lines
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    sseBuffer += decoder.decode(value, { stream: true });
+    const lines = sseBuffer.split(/\r?\n/);
+    sseBuffer = lines.pop() || '';
+    for (const line of lines) {
+      processLine(line);
+    }
+  }
+  sseBuffer += decoder.decode();
+  if (sseBuffer.trim()) {
+    for (const line of sseBuffer.split(/\r?\n/)) {
+      processLine(line);
+    }
+  }
+
+  return fullText.trim();
+}
+
+/**
+ * Incrementally extract a decoded string value for `fieldName` from a partially streamed JSON buffer.
+ */
+export function extractPartialJsonStringField(raw, fieldName) {
+  if (!raw || !fieldName) return '';
+  const pattern = new RegExp(`"${fieldName}"\\s*:\\s*"`, 'g');
+  let match = null;
+  let lastMatch = null;
+  while ((match = pattern.exec(raw)) !== null) {
+    lastMatch = match;
+  }
+  if (!lastMatch) return '';
+
+  let idx = lastMatch.index + lastMatch[0].length;
+  let out = '';
+  while (idx < raw.length) {
+    const ch = raw[idx];
+    if (ch === '"') break;
+    if (ch === '\\') {
+      if (idx + 1 >= raw.length) break; // incomplete escape at stream edge
+      const next = raw[idx + 1];
+      if (next === 'n') { out += '\n'; idx += 2; continue; }
+      if (next === 'r') { out += '\r'; idx += 2; continue; }
+      if (next === 't') { out += '\t'; idx += 2; continue; }
+      if (next === '"' || next === '\\' || next === '/') { out += next; idx += 2; continue; }
+      if (next === 'u') {
+        if (idx + 6 > raw.length) break; // wait for complete \uXXXX
+        const hex = raw.slice(idx + 2, idx + 6);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          out += String.fromCharCode(parseInt(hex, 16));
+          idx += 6;
+          continue;
+        }
+      }
+      out += next;
+      idx += 2;
+      continue;
+    }
+    out += ch;
+    idx += 1;
+  }
+  return out;
+}
+
 function extractTextPart(data) {
   const parts = data?.candidates?.[0]?.content?.parts || [];
   return parts
@@ -110,6 +230,9 @@ function buildThinkingConfig(model) {
     // Gemini 4 Neon & Hydrogen support 'minimal'; Carbon & Argon support 'low'
     const level = model === 'gemini-4-neon' || model === 'gemini-4-hydrogen' ? 'minimal' : 'low';
     return { thinkingConfig: { thinkingLevel: level } };
+  }
+  if (model === 'gemini-3.5-flash-lite') {
+    return { thinkingConfig: { thinkingLevel: 'minimal' } };
   }
   if (model === 'gemini-3.8-flash') {
     return { thinkingConfig: { thinkingLevel: 'low' } };
@@ -173,6 +296,7 @@ export async function interpretListeningAudio({
   preferredLang = 'en',
   speakerMemory = {},
   recentContext = [],
+  onStream = null,
   signal,
 }) {
   const langInfo = TARGET_LANGUAGES[preferredLang] || TARGET_LANGUAGES.en;
@@ -291,8 +415,34 @@ export async function interpretListeningAudio({
     },
   };
 
-  const data = await postGenerateContent(apiKey, model, payload, signal);
-  const raw = extractTextPart(data);
+  let raw = '';
+  if (typeof onStream === 'function') {
+    raw = await postStreamGenerateContent(
+      apiKey,
+      model,
+      payload,
+      (partial) => {
+        const zh = extractPartialJsonStringField(partial, 'chinese_translation');
+        const original = extractPartialJsonStringField(partial, 'original_text');
+        const speaker = extractPartialJsonStringField(partial, 'speaker') || 'A';
+        const lang = extractPartialJsonStringField(partial, 'lang') || '';
+        if (zh || original) {
+          onStream({
+            direction: 'inbound',
+            speaker: speaker.toUpperCase().slice(0, 4) || 'A',
+            lang: lang.toLowerCase().slice(0, 8),
+            mainText: zh || original,
+            subText: zh && original && original !== zh ? original : '',
+          });
+        }
+      },
+      signal
+    );
+  } else {
+    const data = await postGenerateContent(apiKey, model, payload, signal);
+    raw = extractTextPart(data);
+  }
+
   const parsed = safeJsonParse(raw);
   const list = Array.isArray(parsed?.utterances) ? parsed.utterances : [];
 
@@ -349,6 +499,7 @@ export async function translateOutboundChinese({
   mimeType = 'audio/wav',
   textInput = null,
   recentContext = [],
+  onStream = null,
   signal,
 }) {
   const langInfo = TARGET_LANGUAGES[targetLang] || TARGET_LANGUAGES.en;
@@ -435,8 +586,36 @@ export async function translateOutboundChinese({
     },
   };
 
-  const data = await postGenerateContent(apiKey, model, payload, signal);
-  const raw = extractTextPart(data);
+  let raw = '';
+  if (typeof onStream === 'function') {
+    raw = await postStreamGenerateContent(
+      apiKey,
+      model,
+      payload,
+      (partial) => {
+        const srcLang = (extractPartialJsonStringField(partial, 'source_lang') || '').toLowerCase();
+        const srcText = extractPartialJsonStringField(partial, 'source_text') || textInput || '';
+        const translated = extractPartialJsonStringField(partial, 'translated');
+        const reading = extractPartialJsonStringField(partial, 'reading');
+        if (translated || srcText) {
+          const isSrcZh = srcLang ? srcLang.startsWith('zh') : /[\u4e00-\u9fff]/.test(srcText);
+          onStream({
+            direction: isSrcZh ? 'outbound' : 'inbound',
+            speaker: isSrcZh ? '我' : '譯',
+            lang: isSrcZh ? langInfo.code : (srcLang || langInfo.code),
+            mainText: translated || srcText,
+            subText: translated && srcText && translated !== srcText ? (isSrcZh ? `原話：${srcText}` : srcText) : '',
+            reading: isSrcZh ? reading : '',
+          });
+        }
+      },
+      signal
+    );
+  } else {
+    const data = await postGenerateContent(apiKey, model, payload, signal);
+    raw = extractTextPart(data);
+  }
+
   const parsed = safeJsonParse(raw);
 
   if (!parsed || !parsed.translated || !parsed.translated.trim()) {

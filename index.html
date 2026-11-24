@@ -15,7 +15,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=2.1" />
+  <link rel="stylesheet" href="./styles.css?v=2.2" />
 </head>
 <body>
   <div class="app-shell" id="appShell">
@@ -27,7 +27,7 @@
           <div class="brand-text">
             <div class="brand-title-row" style="display:flex;align-items:center;gap:6px;white-space:nowrap;">
               <h1 class="brand-title">隨身口譯官</h1>
-              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v2.1</button>
+              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v2.2</button>
             </div>
             <div class="status-line">
               <span class="status-dot ready" id="statusDot"></span>
@@ -84,23 +84,32 @@
       </nav>
     </header>
 
-    <!-- Single Clean Listening Switch -->
-    <section class="switch-deck" aria-label="即時聆聽翻譯開關">
+    <!-- Dual Clean Switches: Listening + Optional Live Streaming Mode -->
+    <section class="switch-deck" aria-label="即時聆聽與 Live 串流開關">
       <button class="switch-card" id="listenSwitch" type="button" role="switch" aria-checked="false">
         <div class="switch-meta">
           <span class="switch-label">即時聆聽翻譯</span>
-          <span class="switch-sub" id="listenSub">外語自動翻中文・中文直接印出（防休眠恆亮）</span>
+          <span class="switch-sub" id="listenSub">極速串流・防休眠</span>
+        </div>
+        <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+      </button>
+
+      <button class="switch-card live-switch-card" id="liveModeSwitch" type="button" role="switch" aria-checked="false" title="切換 Gemini Live 雙向串流（超低延遲；預設關閉以省額度）">
+        <div class="switch-meta">
+          <span class="switch-label">⚡ Live 串流</span>
+          <span class="switch-sub" id="liveModeSub">關閉（極速省額度）</span>
         </div>
         <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
       </button>
     </section>
 
-    <!-- Live VAD Waveform Bar (visible while Listening Switch is ON) -->
+    <!-- Live VAD / Streaming Waveform Bar (visible while Listening is ON) -->
     <div class="listen-strip" id="listenStrip">
       <div class="listen-strip-left">
         <div class="wave-bars" id="waveBars" aria-hidden="true">
           <span></span><span></span><span></span><span></span><span></span>
         </div>
+        <span class="live-timer-pill hidden" id="liveTimerPill">⚡ LIVE 00:00</span>
         <span id="vadStatus">聆聽環境聲音中⋯停頓會自動翻譯</span>
       </div>
       <button class="flush-btn" id="flushBtn" type="button">立即送出</button>
@@ -264,12 +273,22 @@
         </div>
 
         <div class="field-group">
-          <label class="field-label" for="silenceSelect">聆聽模式自動斷句速度</label>
+          <label class="field-label" for="silenceSelect">聆聽模式自動斷句速度（方案 A）</label>
           <select id="silenceSelect" class="select-control">
-            <option value="950">快速（停頓 0.95 秒送出）</option>
-            <option value="1300" selected>標準（停頓 1.3 秒送出）</option>
+            <option value="650">極速（停頓 0.65 秒送出，反應最快）</option>
+            <option value="850" selected>快速（停頓 0.85 秒送出，推薦預設）</option>
+            <option value="1300">標準（停頓 1.3 秒送出）</option>
             <option value="1800">從容（停頓 1.8 秒送出，適合講話較慢）</option>
           </select>
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="liveModelSelect">⚡ Live 串流模式模型（雙向 WebSocket）</label>
+          <select id="liveModelSelect" class="select-control">
+            <option value="gemini-3.8-live">Gemini 3.8 Live（推薦・最新超低延遲原生語音）</option>
+            <option value="gemini-3.1-flash-live-preview">Gemini 3.1 Flash Live（備用・高速即時串流）</option>
+          </select>
+          <span class="field-hint">僅在開啟主畫面「⚡ Live 串流」開關時啟用；連續靜音 5 分鐘會自動斷線省額度。</span>
         </div>
 
         <div class="field-group">
@@ -280,6 +299,22 @@
             <option value="0.032">抗噪（咖啡廳、街道等較吵雜處）</option>
           </select>
         </div>
+
+        <label class="setting-row">
+          <span>
+            <strong style="display:block;font-size:13.5px;">說話時即時顯示預覽字幕（免費）</strong>
+            <span class="field-hint">使用手機瀏覽器內建語音辨識邊說邊出草稿，送出後由 Gemini 精準譯文取代</span>
+          </span>
+          <input type="checkbox" id="draftCaptionCheck" checked />
+        </label>
+
+        <label class="setting-row">
+          <span>
+            <strong style="display:block;font-size:13.5px;">Live 模式即時唸出譯文</strong>
+            <span class="field-hint">關閉時為靜音字幕（點 🔊 可 0 秒零延遲播放已快取語音）；開啟則同步播音</span>
+          </span>
+          <input type="checkbox" id="liveAutoSpeakCheck" />
+        </label>
 
         <label class="setting-row">
           <span>
@@ -319,6 +354,6 @@
   <!-- Toast -->
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="./app.js?v=2.1"></script>
+  <script type="module" src="./app.js?v=2.2"></script>
 </body>
 </html>

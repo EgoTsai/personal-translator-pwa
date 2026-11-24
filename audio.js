@@ -3,12 +3,13 @@
  * and iOS Safari-safe Gemini 24kHz PCM TTS playback.
  */
 
-const TARGET_SAMPLE_RATE = 16000;
+const PLAN_A_SAMPLE_RATE = 12000;
+const LIVE_PCM_SAMPLE_RATE = 16000;
 
 /**
- * Downsample Float32 PCM buffer from inputRate to 16kHz and encode as 16-bit mono WAV.
+ * Downsample Float32 PCM buffer from inputRate to targetSampleRate and encode as 16-bit mono WAV.
  */
-export function encodeWav16kMono(chunks, inputSampleRate) {
+export function encodeWavMono(chunks, inputSampleRate, targetSampleRate = PLAN_A_SAMPLE_RATE) {
   let totalLen = 0;
   for (const c of chunks) totalLen += c.length;
   if (totalLen === 0) return null;
@@ -21,10 +22,10 @@ export function encodeWav16kMono(chunks, inputSampleRate) {
   }
 
   let resampled;
-  if (inputSampleRate === TARGET_SAMPLE_RATE) {
+  if (inputSampleRate === targetSampleRate) {
     resampled = merged;
   } else {
-    const ratio = inputSampleRate / TARGET_SAMPLE_RATE;
+    const ratio = inputSampleRate / targetSampleRate;
     const outLength = Math.max(1, Math.round(merged.length / ratio));
     resampled = new Float32Array(outLength);
     for (let i = 0; i < outLength; i++) {
@@ -47,8 +48,8 @@ export function encodeWav16kMono(chunks, inputSampleRate) {
   view.setUint32(16, 16, true); // PCM chunk size
   view.setUint16(20, 1, true); // PCM format
   view.setUint16(22, 1, true); // mono
-  view.setUint32(24, TARGET_SAMPLE_RATE, true);
-  view.setUint32(28, TARGET_SAMPLE_RATE * 2, true); // byte rate
+  view.setUint32(24, targetSampleRate, true);
+  view.setUint32(28, targetSampleRate * 2, true); // byte rate
   view.setUint16(32, 2, true); // block align
   view.setUint16(34, 16, true); // bits per sample
   writeAscii(view, 36, 'data');
@@ -66,8 +67,40 @@ export function encodeWav16kMono(chunks, inputSampleRate) {
     bytes,
     base64: uint8ToBase64(bytes),
     mimeType: 'audio/wav',
-    durationSec: numSamples / TARGET_SAMPLE_RATE,
+    durationSec: numSamples / targetSampleRate,
   };
+}
+
+/**
+ * Compatibility wrapper for 16kHz mono WAV encoding.
+ */
+export function encodeWav16kMono(chunks, inputSampleRate) {
+  return encodeWavMono(chunks, inputSampleRate, LIVE_PCM_SAMPLE_RATE);
+}
+
+/**
+ * Resample Float32 frame to 16-bit little-endian Int16 PCM at 16kHz for Gemini Live API.
+ */
+export function resampleFloat32ToInt16Pcm(frame, inputSampleRate, targetSampleRate = LIVE_PCM_SAMPLE_RATE) {
+  if (!frame || frame.length === 0) return new Int16Array(0);
+  const ratio = inputSampleRate / targetSampleRate;
+  const outLength = inputSampleRate === targetSampleRate ? frame.length : Math.max(1, Math.round(frame.length / ratio));
+  const out = new Int16Array(outLength);
+  for (let i = 0; i < outLength; i++) {
+    let sample;
+    if (inputSampleRate === targetSampleRate) {
+      sample = frame[i];
+    } else {
+      const srcIdx = i * ratio;
+      const idx0 = Math.floor(srcIdx);
+      const idx1 = Math.min(idx0 + 1, frame.length - 1);
+      const frac = srcIdx - idx0;
+      sample = frame[idx0] * (1 - frac) + frame[idx1] * frac;
+    }
+    const clamped = Math.max(-1, Math.min(1, sample));
+    out[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+  }
+  return out;
 }
 
 function writeAscii(view, offset, str) {
@@ -116,17 +149,18 @@ export class AudioEngine {
     this.captureNode = null;
     this.silentGain = null;
 
-    // VAD state
+    // VAD & Live stream state
     this.listening = false;
+    this.liveStreaming = false;
     this.manualCapturing = false;
     this.muted = false;
     this.muteUntil = 0;
 
     this.vadThreshold = 0.018;
-    this.silenceMs = 1300;
-    this.minSpeechMs = 450;
+    this.silenceMs = 850;
+    this.minSpeechMs = 420;
     this.maxChunkMs = 14000;
-    this.preRollMs = 450;
+    this.preRollMs = 420;
 
     this.preRollChunks = [];
     this.preRollSamples = 0;
@@ -140,6 +174,11 @@ export class AudioEngine {
     this.manualSamples = 0;
     this.manualStartTs = 0;
 
+    // Live PCM accumulation (~100ms = 1600 samples at 16kHz)
+    this.livePcmPending = [];
+    this.livePcmPendingSamples = 0;
+    this.onLivePcmChunk = null; // (int16Array) => void
+
     // Callbacks
     this.onLevel = null; // (rms, activeState) => void
     this.onVadSegment = null; // (wavPayload) => void
@@ -147,6 +186,8 @@ export class AudioEngine {
 
     // Playback state
     this.currentSource = null;
+    this.livePlaybackSources = [];
+    this.livePlaybackCursor = 0;
     this.ttsCache = new Map();
     this.onPlaybackChange = null; // (playingId | null) => void
     this.playingId = null;
@@ -244,7 +285,7 @@ export class AudioEngine {
   }
 
   releaseMicrophoneIfIdle() {
-    if (this.listening || this.manualCapturing) return;
+    if (this.listening || this.liveStreaming || this.manualCapturing) return;
     if (this.captureNode) {
       try { this.captureNode.disconnect(); } catch (_) {}
       this.captureNode = null;
@@ -267,6 +308,7 @@ export class AudioEngine {
   async startListening() {
     await this.ensureMicrophone();
     this._resetVadBuffers();
+    this.liveStreaming = false;
     this.listening = true;
   }
 
@@ -276,6 +318,25 @@ export class AudioEngine {
     }
     this.listening = false;
     this._resetVadBuffers();
+    this.releaseMicrophoneIfIdle();
+  }
+
+  async startLiveStream(onPcmChunk) {
+    await this.ensureMicrophone();
+    this._resetVadBuffers();
+    this.listening = false;
+    this.livePcmPending = [];
+    this.livePcmPendingSamples = 0;
+    this.onLivePcmChunk = onPcmChunk || null;
+    this.liveStreaming = true;
+  }
+
+  stopLiveStream() {
+    this.liveStreaming = false;
+    this.livePcmPending = [];
+    this.livePcmPendingSamples = 0;
+    this.onLivePcmChunk = null;
+    this.stopLivePlayback();
     this.releaseMicrophoneIfIdle();
   }
 
@@ -311,11 +372,11 @@ export class AudioEngine {
     this.manualSamples = 0;
 
     // Brief cooldown before ambient VAD resumes
-    this.muteUntil = performance.now() + 300;
+    this.muteUntil = performance.now() + 250;
     this.releaseMicrophoneIfIdle();
 
     if (chunks.length === 0) return null;
-    const wav = encodeWav16kMono(chunks, sampleRate);
+    const wav = encodeWavMono(chunks, sampleRate, PLAN_A_SAMPLE_RATE);
     if (!wav || wav.durationSec < 0.25) return null;
     return wav;
   }
@@ -352,6 +413,35 @@ export class AudioEngine {
       this.manualChunks.push(frame);
       this.manualSamples += frame.length;
       if (this.onLevel) this.onLevel(rms, 'manual');
+      return;
+    }
+
+    // Live WebSocket streaming mode: bypass local VAD, stream 16kHz Int16 PCM directly every ~100ms
+    if (this.liveStreaming) {
+      if (this.muted || now < this.muteUntil) {
+        if (this.onLevel) this.onLevel(0, 'muted');
+        return;
+      }
+      if (this.onLevel) this.onLevel(rms, rms >= this.vadThreshold ? 'speaking' : 'idle');
+
+      const sampleRate = this.ctx ? this.ctx.sampleRate : 48000;
+      const pcm16 = resampleFloat32ToInt16Pcm(frame, sampleRate, LIVE_PCM_SAMPLE_RATE);
+      if (pcm16.length > 0) {
+        this.livePcmPending.push(pcm16);
+        this.livePcmPendingSamples += pcm16.length;
+        // ~100ms chunk (1600 samples @ 16kHz = 3200 bytes)
+        if (this.livePcmPendingSamples >= 1600) {
+          const merged = new Int16Array(this.livePcmPendingSamples);
+          let off = 0;
+          for (const part of this.livePcmPending) {
+            merged.set(part, off);
+            off += part.length;
+          }
+          this.livePcmPending = [];
+          this.livePcmPendingSamples = 0;
+          if (this.onLivePcmChunk) this.onLivePcmChunk(merged);
+        }
+      }
       return;
     }
 
@@ -417,12 +507,12 @@ export class AudioEngine {
 
     this._resetVadBuffers();
 
-    const minMs = force ? 300 : this.minSpeechMs;
+    const minMs = force ? 280 : this.minSpeechMs;
     if (chunks.length === 0 || speechDurationMs < minMs) {
       return false;
     }
 
-    const wav = encodeWav16kMono(chunks, sampleRate);
+    const wav = encodeWavMono(chunks, sampleRate, PLAN_A_SAMPLE_RATE);
     if (wav && this.onVadSegment) {
       this.onVadSegment(wav);
       return true;
@@ -581,7 +671,91 @@ export class AudioEngine {
     });
   }
 
+  /**
+   * Stitch raw 16-bit LE PCM chunks (e.g. from Gemini Live 24kHz audio) into a single AudioBuffer.
+   */
+  async pcmChunksToAudioBuffer(uint8Chunks, sampleRate = 24000) {
+    if (!Array.isArray(uint8Chunks) || uint8Chunks.length === 0) return null;
+    let totalBytes = 0;
+    for (const c of uint8Chunks) totalBytes += c.byteLength;
+    const sampleCount = Math.floor(totalBytes / 2);
+    if (sampleCount <= 0) return null;
+
+    const ctx = await this.ensureContext();
+    const merged = new Uint8Array(sampleCount * 2);
+    let offset = 0;
+    for (const c of uint8Chunks) {
+      const copyLen = Math.min(c.byteLength, merged.byteLength - offset);
+      if (copyLen > 0) {
+        merged.set(c.subarray(0, copyLen), offset);
+        offset += copyLen;
+      }
+    }
+
+    const view = new DataView(merged.buffer, merged.byteOffset, merged.byteLength);
+    const audioBuffer = ctx.createBuffer(1, sampleCount, sampleRate);
+    const channel = audioBuffer.getChannelData(0);
+    for (let i = 0; i < sampleCount; i++) {
+      channel[i] = view.getInt16(i * 2, true) / 32768;
+    }
+    return audioBuffer;
+  }
+
+  cacheAudioBuffer(cacheKey, audioBuffer) {
+    if (!cacheKey || !audioBuffer) return;
+    this.ttsCache.set(cacheKey, audioBuffer);
+    if (this.ttsCache.size > 40) {
+      const oldestKey = this.ttsCache.keys().next().value;
+      this.ttsCache.delete(oldestKey);
+    }
+  }
+
+  /**
+   * Optional real-time gapless playback for Gemini Live 24kHz PCM chunks (echo-guarded).
+   */
+  async enqueueLiveAudioChunk(uint8Bytes, sampleRate = 24000) {
+    if (!uint8Bytes || uint8Bytes.byteLength < 2) return;
+    const ctx = await this.ensureContext();
+    const sampleCount = Math.floor(uint8Bytes.byteLength / 2);
+    const view = new DataView(uint8Bytes.buffer, uint8Bytes.byteOffset, uint8Bytes.byteLength);
+    const audioBuffer = ctx.createBuffer(1, sampleCount, sampleRate);
+    const channel = audioBuffer.getChannelData(0);
+    for (let i = 0; i < sampleCount; i++) {
+      channel[i] = view.getInt16(i * 2, true) / 32768;
+    }
+
+    const src = ctx.createBufferSource();
+    src.buffer = audioBuffer;
+    src.connect(ctx.destination);
+
+    const now = ctx.currentTime;
+    const startAt = Math.max(now + 0.02, this.livePlaybackCursor);
+    this.livePlaybackCursor = startAt + audioBuffer.duration;
+    this.livePlaybackSources.push(src);
+    this.muted = true;
+
+    src.onended = () => {
+      const idx = this.livePlaybackSources.indexOf(src);
+      if (idx >= 0) this.livePlaybackSources.splice(idx, 1);
+      if (this.livePlaybackSources.length === 0 && !this.currentSource) {
+        this.muted = false;
+        this.muteUntil = performance.now() + 360;
+      }
+    };
+
+    src.start(startAt);
+  }
+
+  stopLivePlayback() {
+    for (const src of this.livePlaybackSources) {
+      try { src.stop(); } catch (_) {}
+    }
+    this.livePlaybackSources = [];
+    this.livePlaybackCursor = 0;
+  }
+
   stopPlayback() {
+    this.stopLivePlayback();
     if (this.currentSource) {
       try { this.currentSource.stop(); } catch (_) {}
       this.currentSource = null;
