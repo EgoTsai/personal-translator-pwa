@@ -97,6 +97,19 @@ function extractTextPart(data) {
     .trim();
 }
 
+function buildThinkingConfig(model) {
+  if (!model) return {};
+  if (model.startsWith('gemini-4-')) {
+    // Gemini 4 Neon & Hydrogen support 'minimal'; Carbon & Argon support 'low'
+    const level = model === 'gemini-4-neon' || model === 'gemini-4-hydrogen' ? 'minimal' : 'low';
+    return { thinkingConfig: { thinkingLevel: level } };
+  }
+  if (model === 'gemini-3.8-flash') {
+    return { thinkingConfig: { thinkingLevel: 'low' } };
+  }
+  return {};
+}
+
 function safeJsonParse(raw) {
   if (!raw) return null;
   let cleaned = raw.trim();
@@ -183,7 +196,7 @@ export async function interpretListeningAudio({
     ],
     generationConfig: {
       temperature: 0.15,
-      ...(model.startsWith('gemini-4-') ? { thinkingConfig: { thinkingLevel: 'minimal' } } : {}),
+      ...buildThinkingConfig(model),
       responseMimeType: 'application/json',
       responseSchema: {
         type: 'OBJECT',
@@ -312,7 +325,7 @@ export async function translateOutboundChinese({
     ],
     generationConfig: {
       temperature: 0.25,
-      ...(model.startsWith('gemini-4-') ? { thinkingConfig: { thinkingLevel: 'minimal' } } : {}),
+      ...buildThinkingConfig(model),
       responseMimeType: 'application/json',
       responseSchema: {
         type: 'OBJECT',
@@ -422,7 +435,7 @@ export async function testApiKey({ apiKey, model = 'gemini-3.5-flash-lite' }) {
     generationConfig: {
       maxOutputTokens: 32,
       temperature: 0,
-      ...(model.startsWith('gemini-4-') ? { thinkingConfig: { thinkingLevel: 'minimal' } } : {}),
+      ...buildThinkingConfig(model),
     },
   };
 
