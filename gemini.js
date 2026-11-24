@@ -40,6 +40,13 @@ export const TONE_PRESETS = {
   casual: '輕鬆親切、像朋友間聊天一樣自然口語',
 };
 
+export const ICEBREAKER_BANNERS = {
+  en: 'AI Translator · Please feel free to speak',
+  ja: 'AI通訳中です・どうぞお話しください',
+  sv: 'AI-översättare · Varsågod och prata',
+  zh: '隨身 AI 口譯官',
+};
+
 function friendlyApiError(status, bodyText) {
   let detail = '';
   try {
@@ -506,6 +513,129 @@ export async function synthesizeGeminiSpeech({
   return {
     base64: audioPart.inlineData.data,
     mimeType: audioPart.inlineData.mimeType || 'audio/wav',
+  };
+}
+
+/**
+ * Mode 4: Photo / Menu / Sign / Document Translation
+ * - Non-Chinese photo -> translate cleanly into Traditional Chinese (zh-TW) with item breakdown
+ * - Chinese photo -> translate into selected counterpart language (en / ja / sv)
+ */
+export async function translateImageWithGemini({
+  apiKey,
+  model,
+  imageBase64,
+  mimeType = 'image/jpeg',
+  targetLang = 'en',
+  signal,
+}) {
+  const langInfo = TARGET_LANGUAGES[targetLang] || TARGET_LANGUAGES.en;
+
+  const systemInstruction = `你是使用者的隨身視覺翻譯官，專精於旅遊與日常面對面場景（餐廳菜單、飲料單、路標、車站時刻表、收據、食品成分、商店告示與文件）。
+
+請仔細閱讀圖片中的文字，並嚴格遵守以下規則：
+1. **自動語言判斷**：
+   - 若圖片主要文字是**非中文**（日語、英語、瑞典語或其他外語）：將內容清楚翻譯成自然道地的**繁體中文（台灣慣用語）**，\`target_lang\` 設為 \`"zh"\`。
+   - 若圖片主要文字是**中文**：翻譯成「${langInfo.label}（${langInfo.nativeName}）」，\`target_lang\` 設為 \`"${langInfo.code}"\`。
+2. **結構化整理（適合手機快速閱讀）**：
+   - \`title\`：簡短標題（12字內，例如「日文拉麵菜單」「瑞典咖啡廳價目表」「英文告示」）。
+   - \`summary\`：若為單段告示／路標，直接給出完整自然譯文；若為菜單／清單，給出一句話總覽（例如「共辨識 6 項餐點，皆含稅價」）。
+   - \`items\`：若圖片有多個條目（如菜單菜名＋價格、注意事項條列），請逐項整理（最多 15 項最重要條目）：
+     - \`original\`：原文（方便使用者點選發音或對照點菜）
+     - \`translated\`：對應譯文（若是菜單可保留價格數字與簡短食材說明）
+     - \`note\`：簡短補充（如「含堅果」「辣」「人氣推薦」；無則留空字串）
+   - 若圖片只是單一短句或路標，\`items\` 可放 1 筆即可。
+3. 若圖片完全沒有可辨識文字，請在 \`summary\` 說明「圖片中未偵測到清楚文字」，\`items\` 設為空陣列。
+4. 只輸出符合 schema 的 JSON。`;
+
+  const payload = {
+    systemInstruction: {
+      parts: [{ text: systemInstruction }],
+    },
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          {
+            inlineData: {
+              mimeType,
+              data: imageBase64,
+            },
+          },
+          {
+            text: `請辨識並翻譯這張圖片中的所有重要文字（非中文翻成繁體中文；中文翻成${langInfo.label}）。`,
+          },
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.15,
+      ...buildThinkingConfig(model),
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'OBJECT',
+        properties: {
+          source_lang: {
+            type: 'STRING',
+            description: '圖片主要文字語言 ISO 639-1 代碼，如 ja, en, sv, zh',
+          },
+          target_lang: {
+            type: 'STRING',
+            description: `翻譯目標語言代碼：外語圖片為 zh，中文圖片為 ${langInfo.code}`,
+          },
+          title: {
+            type: 'STRING',
+            description: '簡短標題，例如「日文菜單翻譯」',
+          },
+          summary: {
+            type: 'STRING',
+            description: '主譯文或摘要',
+          },
+          items: {
+            type: 'ARRAY',
+            items: {
+              type: 'OBJECT',
+              properties: {
+                original: { type: 'STRING', description: '圖片原文條目' },
+                translated: { type: 'STRING', description: '自然譯文（可含價格）' },
+                note: { type: 'STRING', description: '簡短備註，無則留空' },
+              },
+              required: ['original', 'translated', 'note'],
+            },
+          },
+        },
+        required: ['source_lang', 'target_lang', 'title', 'summary', 'items'],
+      },
+    },
+  };
+
+  const data = await postGenerateContent(apiKey, model, payload, signal);
+  const raw = extractTextPart(data);
+  const parsed = safeJsonParse(raw);
+
+  if (!parsed) return null;
+
+  const sourceLang = String(parsed.source_lang || 'en').trim().toLowerCase().slice(0, 8);
+  const isSourceChinese = sourceLang.startsWith('zh');
+  const resolvedTargetLang = isSourceChinese ? langInfo.code : 'zh';
+  const items = Array.isArray(parsed.items)
+    ? parsed.items
+        .filter((it) => it && (it.translated || it.original))
+        .slice(0, 15)
+        .map((it) => ({
+          original: String(it.original || '').trim(),
+          translated: String(it.translated || it.original || '').trim(),
+          note: String(it.note || '').trim(),
+        }))
+    : [];
+
+  return {
+    sourceLang: isSourceChinese ? 'zh' : sourceLang,
+    targetLang: resolvedTargetLang,
+    isSourceChinese,
+    title: String(parsed.title || '拍照翻譯').trim(),
+    summary: String(parsed.summary || (items[0]?.translated || '')).trim(),
+    items,
   };
 }
 

@@ -5,8 +5,10 @@
 import { AudioEngine } from './audio.js';
 import {
   TARGET_LANGUAGES,
+  ICEBREAKER_BANNERS,
   interpretListeningAudio,
   translateOutboundChinese,
+  translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
 } from './gemini.js';
@@ -42,6 +44,13 @@ const LANG_BADGE_MAP = {
   es: '西',
 };
 
+const TONE_META = {
+  natural: { short: '日常', toast: '語氣：日常自然' },
+  polite: { short: '禮貌', toast: '語氣：禮貌敬語（日文用丁寧語）' },
+  casual: { short: '口語', toast: '語氣：輕鬆口語（朋友聊天）' },
+};
+const TONE_ORDER = ['natural', 'polite', 'casual'];
+
 // State
 let settings = loadJson(STORAGE_KEYS.settings, DEFAULT_SETTINGS);
 settings = { ...DEFAULT_SETTINGS, ...settings };
@@ -59,8 +68,43 @@ const vadQueue = [];
 let vadProcessing = false;
 let pendingCount = 0;
 let activeShowcardMsg = null;
+let wakeLockSentinel = null;
 
 const audio = new AudioEngine();
+
+// Subtle mobile haptic feedback (safe no-op on unsupported devices)
+function haptic(pattern = 12) {
+  try {
+    if (navigator.vibrate) navigator.vibrate(pattern);
+  } catch (_) {}
+}
+
+// Keep screen awake while listening, recording, or displaying face-to-face Showcard
+async function syncWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  const shouldLock = isListening || isManualRecording || Boolean(activeShowcardMsg);
+  if (shouldLock && !wakeLockSentinel && document.visibilityState === 'visible') {
+    try {
+      wakeLockSentinel = await navigator.wakeLock.request('screen');
+      wakeLockSentinel.addEventListener('release', () => {
+        wakeLockSentinel = null;
+      });
+    } catch (_) {
+      wakeLockSentinel = null;
+    }
+  } else if (!shouldLock && wakeLockSentinel) {
+    try {
+      await wakeLockSentinel.release();
+    } catch (_) {}
+    wakeLockSentinel = null;
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    syncWakeLock();
+  }
+});
 
 // DOM references
 const $ = (id) => document.getElementById(id);
@@ -69,6 +113,7 @@ const els = {
   appShell: $('appShell'),
   statusDot: $('statusDot'),
   statusText: $('statusText'),
+  toneQuickBtn: $('toneQuickBtn'),
   themeBtn: $('themeBtn'),
   exportBtn: $('exportBtn'),
   clearBtn: $('clearBtn'),
@@ -86,10 +131,14 @@ const els = {
   transcriptFeed: $('transcriptFeed'),
   emptyState: $('emptyState'),
   emptyDemoBtn: $('emptyDemoBtn'),
+  quickTextRow: $('quickTextRow'),
   quickChineseInput: $('quickChineseInput'),
   quickSendBtn: $('quickSendBtn'),
+  keyboardToggleBtn: $('keyboardToggleBtn'),
   speakChineseBtn: $('speakChineseBtn'),
   speakBtnLabel: $('speakBtnLabel'),
+  cameraBtn: $('cameraBtn'),
+  cameraInput: $('cameraInput'),
   cancelRecBtn: $('cancelRecBtn'),
 
   settingsSheet: $('settingsSheet'),
@@ -112,6 +161,7 @@ const els = {
   flipShowcardBtn: $('flipShowcardBtn'),
   closeShowcardBtn: $('closeShowcardBtn'),
   showcardContent: $('showcardContent'),
+  showcardBanner: $('showcardBanner'),
   showcardMain: $('showcardMain'),
   showcardReading: $('showcardReading'),
   showcardSub: $('showcardSub'),
@@ -133,7 +183,20 @@ function loadJson(key, fallback) {
 function saveState() {
   try {
     localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(settings));
-    localStorage.setItem(STORAGE_KEYS.messages, JSON.stringify(messages.slice(-120)));
+    // Keep at most 120 messages and strip thumbnails from older photo cards to stay safely under storage quota
+    const recent = messages.slice(-120);
+    let keptThumbs = 0;
+    const pruned = [];
+    for (let i = recent.length - 1; i >= 0; i--) {
+      const m = recent[i];
+      if (m.type === 'photo' && m.thumbUrl) {
+        keptThumbs += 1;
+        pruned.unshift(keptThumbs <= 6 ? m : { ...m, thumbUrl: '' });
+      } else {
+        pruned.unshift(m);
+      }
+    }
+    localStorage.setItem(STORAGE_KEYS.messages, JSON.stringify(pruned));
     localStorage.setItem(STORAGE_KEYS.speakers, JSON.stringify(speakerMemory));
   } catch (_) {}
 }
@@ -180,7 +243,7 @@ function updateHeaderStatus() {
   }
   if (isManualRecording) {
     els.statusDot.classList.add('listening');
-    els.statusText.textContent = '正在收錄你的中文⋯';
+    els.statusText.textContent = '正在收錄語音⋯';
     return;
   }
   if (pendingCount > 0) {
@@ -190,7 +253,7 @@ function updateHeaderStatus() {
   }
   if (isListening) {
     els.statusDot.classList.add('listening');
-    els.statusText.textContent = '即時聆聽翻譯中';
+    els.statusText.textContent = '即時聆聽中・螢幕恆亮';
     return;
   }
   els.statusDot.classList.add('ready');
@@ -202,19 +265,27 @@ function updateSwitchUI() {
   els.listenSwitch.classList.toggle('listen-on', isListening);
   els.listenSwitch.setAttribute('aria-checked', String(isListening));
   els.listenSub.textContent = isListening
-    ? '聆聽中・聽到外語翻中文／中文直接印出'
-    : '外語自動翻中文・中文直接印出（標註 A / B）';
+    ? '聆聽中・外語翻中文／中文直出（防休眠恆亮）'
+    : '外語自動翻中文・中文直接印出（防休眠恆亮）';
   els.listenStrip.classList.toggle('visible', isListening);
+
+  // Tone Quick Chip
+  if (els.toneQuickBtn) {
+    const meta = TONE_META[settings.tone] || TONE_META.natural;
+    els.toneQuickBtn.textContent = meta.short;
+    els.toneQuickBtn.classList.toggle('polite', settings.tone === 'polite');
+  }
 
   // Target language pills & outbound button label
   const langInfo = TARGET_LANGUAGES[settings.targetLang] || TARGET_LANGUAGES.en;
+  const shortTarget = LANG_BADGE_MAP[langInfo.code] || langInfo.label;
   els.langBar.querySelectorAll('.lang-pill').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.lang === settings.targetLang);
   });
 
   els.quickChineseInput.placeholder = `輸入中文或外語，自動互譯（中文 ↔ ${langInfo.label}）⋯`;
   if (!isManualRecording) {
-    els.speakBtnLabel.textContent = `點擊說話（中文 ↔ ${langInfo.label}）`;
+    els.speakBtnLabel.textContent = `按住或點擊說話（中 ↔ ${shortTarget}）`;
   }
 
   // Setup banner
@@ -287,20 +358,38 @@ function syncPlaybackButtons() {
 }
 
 function createMessageCard(msg) {
-  const isOutbound = msg.direction === 'outbound';
+  const isPhoto = msg.type === 'photo';
+  const isOutbound = !isPhoto && msg.direction === 'outbound';
   const spName = displaySpeakerName(msg.speaker, isOutbound);
-  const spClass = speakerColorClass(msg.speaker, isOutbound);
+  const spClass = isPhoto ? 'sp-a' : speakerColorClass(msg.speaker, isOutbound);
 
   const card = document.createElement('article');
-  const cardColorClass = isOutbound ? 'outbound' : `card-${spClass}`;
+  const cardColorClass = isPhoto ? 'photo-card' : isOutbound ? 'outbound' : `card-${spClass}`;
   card.className = `utterance-card ${cardColorClass}`;
   card.dataset.id = msg.id;
 
-  // Determine main text & speakable payload
-  const mainText = isOutbound ? msg.translated : msg.zh;
-  const speakText = isOutbound ? msg.translated : msg.zh;
-  const speakLang = isOutbound ? msg.targetLang : 'zh';
+  const makeInlineSpeakBtn = (cacheId, textToSpeak, langCode, subtle = false) => {
+    const playing = audio.playingId === cacheId;
+    const loading = !playing && loadingSpeakId === cacheId;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.dataset.cacheId = cacheId;
+    btn.className = `inline-speak-btn${subtle ? ' subtle' : ''}${playing ? ' playing' : ''}${loading ? ' loading' : ''}`;
+    btn.title = playing ? '播放中（點擊停止）' : '朗讀這一句';
+    btn.setAttribute('aria-label', btn.title);
+    btn.innerHTML = SPEAKER_ICON_SVG;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (audio.playingId === cacheId) {
+        audio.stopPlayback();
+      } else {
+        speakMessage(cacheId, textToSpeak, langCode);
+      }
+    });
+    return btn;
+  };
 
+  // Top metadata row
   const top = document.createElement('div');
   top.className = 'utterance-top';
 
@@ -310,18 +399,31 @@ function createMessageCard(msg) {
   const spBtn = document.createElement('button');
   spBtn.type = 'button';
   spBtn.className = `speaker-badge ${spClass}`;
-  spBtn.textContent = msg.speaker === '譯' ? '譯' : `${spName}:`;
-  spBtn.title = isOutbound || msg.speaker === '譯' ? '自動互譯' : '點擊切換說話者顏色（A/B/C/D）或改名';
-  if (!isOutbound && msg.speaker !== '譯') {
-    spBtn.addEventListener('click', () => {
-      openSpeakerPickerMsgId = openSpeakerPickerMsgId === msg.id ? null : msg.id;
-      renderFeed();
-    });
+  if (isPhoto) {
+    spBtn.textContent = '📷 拍照';
+    spBtn.title = '拍照翻譯結果';
+  } else {
+    spBtn.textContent = msg.speaker === '譯' ? '譯' : `${spName}:`;
+    spBtn.title = isOutbound || msg.speaker === '譯' ? '自動互譯' : '點擊切換說話者顏色（A/B/C/D）或改名';
+    if (!isOutbound && msg.speaker !== '譯') {
+      spBtn.addEventListener('click', () => {
+        openSpeakerPickerMsgId = openSpeakerPickerMsgId === msg.id ? null : msg.id;
+        renderFeed();
+      });
+    }
   }
 
   const langTag = document.createElement('span');
   langTag.className = 'lang-tag';
-  if (isOutbound) {
+  if (isPhoto) {
+    if (msg.isSourceChinese) {
+      const targetInfo = TARGET_LANGUAGES[msg.targetLang] || TARGET_LANGUAGES.en;
+      langTag.innerHTML = `中 → ${FLAG_SVG_MAP[targetInfo.code] || ''}<span>${targetInfo.label}</span>`;
+    } else {
+      const shortLang = LANG_BADGE_MAP[msg.lang] || (msg.lang || '外語').toUpperCase();
+      langTag.innerHTML = `${FLAG_SVG_MAP[msg.lang] || ''}<span>${shortLang} → 中文</span>`;
+    }
+  } else if (isOutbound) {
     const targetInfo = TARGET_LANGUAGES[msg.targetLang] || TARGET_LANGUAGES.en;
     const flagHtml = FLAG_SVG_MAP[targetInfo.code] || '';
     langTag.innerHTML = `中 → ${flagHtml}<span>${targetInfo.label}</span>`;
@@ -339,19 +441,26 @@ function createMessageCard(msg) {
 
   spGroup.append(spBtn, langTag, timeTag);
 
+  // Determine main text & copyable payload
+  const mainText = isPhoto ? (msg.summary || msg.title || '') : (isOutbound ? msg.translated : msg.zh);
+  const copyText = isPhoto
+    ? [msg.title, msg.summary, ...(msg.items || []).map((it) => `${it.translated}${it.original ? ` (${it.original})` : ''}${it.note ? ` — ${it.note}` : ''}`)].filter(Boolean).join('\n')
+    : mainText;
+
   const actions = document.createElement('div');
   actions.className = 'utterance-actions';
 
-  // Fullscreen Show Card Button
-  const expandBtn = document.createElement('button');
-  expandBtn.type = 'button';
-  expandBtn.className = 'mini-btn';
-  expandBtn.title = '放大給對方看';
-  expandBtn.setAttribute('aria-label', '放大給對方看');
-  expandBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`;
-  expandBtn.addEventListener('click', () => openShowcard(msg));
+  if (!isPhoto) {
+    const expandBtn = document.createElement('button');
+    expandBtn.type = 'button';
+    expandBtn.className = 'mini-btn';
+    expandBtn.title = '放大給對方看';
+    expandBtn.setAttribute('aria-label', '放大給對方看');
+    expandBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`;
+    expandBtn.addEventListener('click', () => openShowcard(msg));
+    actions.appendChild(expandBtn);
+  }
 
-  // Copy Button
   const copyBtn = document.createElement('button');
   copyBtn.type = 'button';
   copyBtn.className = 'mini-btn';
@@ -360,17 +469,89 @@ function createMessageCard(msg) {
   copyBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
   copyBtn.addEventListener('click', async () => {
     try {
-      await navigator.clipboard.writeText(mainText);
+      await navigator.clipboard.writeText(copyText);
       showToast('已複製到剪貼簿');
     } catch (_) {
       showToast('複製失敗');
     }
   });
 
-  actions.append(expandBtn, copyBtn);
+  actions.appendChild(copyBtn);
   top.append(spGroup, actions);
   card.appendChild(top);
 
+  // Photo card layout (menu / sign / document breakdown)
+  if (isPhoto) {
+    const hero = document.createElement('div');
+    hero.className = 'photo-hero';
+    if (msg.thumbUrl) {
+      const img = document.createElement('img');
+      img.className = 'photo-thumb';
+      img.src = msg.thumbUrl;
+      img.alt = msg.title || '拍照翻譯縮圖';
+      hero.appendChild(img);
+    }
+    const sumBox = document.createElement('div');
+    sumBox.className = 'photo-summary-box';
+    if (msg.title) {
+      const titleEl = document.createElement('div');
+      titleEl.className = 'photo-title';
+      titleEl.textContent = msg.title;
+      sumBox.appendChild(titleEl);
+    }
+    if (msg.summary) {
+      const sumEl = document.createElement('div');
+      sumEl.className = 'utterance-main';
+      sumEl.style.fontSize = '15px';
+      sumEl.textContent = msg.summary;
+      sumBox.appendChild(sumEl);
+    }
+    hero.appendChild(sumBox);
+    card.appendChild(hero);
+
+    if (Array.isArray(msg.items) && msg.items.length > 0) {
+      const listEl = document.createElement('div');
+      listEl.className = 'photo-items';
+      msg.items.forEach((it, idx) => {
+        const row = document.createElement('div');
+        row.className = 'photo-item';
+
+        const zhRow = document.createElement('div');
+        zhRow.className = 'photo-item-zh';
+        zhRow.textContent = it.translated;
+        // If photo was Chinese -> Foreign, put speak icon right after the translated foreign item
+        if (msg.isSourceChinese && it.translated) {
+          zhRow.appendChild(makeInlineSpeakBtn(`${msg.id}_it_${idx}`, it.translated, msg.targetLang, true));
+        }
+        row.appendChild(zhRow);
+
+        if (it.original && it.original !== it.translated) {
+          const origRow = document.createElement('div');
+          origRow.className = 'photo-item-orig';
+          origRow.appendChild(document.createTextNode(it.original));
+          // Let user tap to pronounce foreign menu item directly to the waiter!
+          if (!msg.isSourceChinese) {
+            origRow.appendChild(makeInlineSpeakBtn(`${msg.id}_it_${idx}`, it.original, msg.lang || settings.targetLang, true));
+          }
+          row.appendChild(origRow);
+        }
+
+        if (it.note) {
+          const noteRow = document.createElement('div');
+          noteRow.className = 'photo-item-note';
+          noteRow.textContent = `※ ${it.note}`;
+          row.appendChild(noteRow);
+        }
+
+        listEl.appendChild(row);
+      });
+      card.appendChild(listEl);
+    }
+
+    return card;
+  }
+
+  // Standard conversation card
   if (!isOutbound && openSpeakerPickerMsgId === msg.id) {
     const picker = document.createElement('div');
     picker.className = 'speaker-picker';
@@ -400,33 +581,18 @@ function createMessageCard(msg) {
     card.appendChild(picker);
   }
 
-  const makeInlineSpeakBtn = (cacheId, textToSpeak, langCode, subtle = false) => {
-    const playing = audio.playingId === cacheId;
-    const loading = !playing && loadingSpeakId === cacheId;
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.dataset.cacheId = cacheId;
-    btn.className = `inline-speak-btn${subtle ? ' subtle' : ''}${playing ? ' playing' : ''}${loading ? ' loading' : ''}`;
-    btn.title = playing ? '播放中（點擊停止）' : '朗讀這一句';
-    btn.setAttribute('aria-label', btn.title);
-    btn.innerHTML = SPEAKER_ICON_SVG;
-    btn.addEventListener('click', () => {
-      if (audio.playingId === cacheId) {
-        audio.stopPlayback();
-      } else {
-        speakMessage(cacheId, textToSpeak, langCode);
-      }
-    });
-    return btn;
-  };
+  const speakText = isOutbound ? msg.translated : msg.zh;
+  const speakLang = isOutbound ? msg.targetLang : 'zh';
 
-  // Main text with inline speak icon directly after the sentence
+  // Main text (tap text itself to open Face-to-Face Showcard) + inline speak icon
   const mainEl = document.createElement('div');
   mainEl.className = 'utterance-main';
-  mainEl.append(
-    document.createTextNode(mainText),
-    makeInlineSpeakBtn(msg.id, speakText, speakLang, false)
-  );
+  const mainSpan = document.createElement('span');
+  mainSpan.className = 'utterance-main-text';
+  mainSpan.textContent = mainText;
+  mainSpan.title = '點擊放大給對方看';
+  mainSpan.addEventListener('click', () => openShowcard(msg));
+  mainEl.append(mainSpan, makeInlineSpeakBtn(msg.id, speakText, speakLang, false));
   card.appendChild(mainEl);
 
   if (isOutbound && msg.reading) {
@@ -507,7 +673,7 @@ async function speakMessage(msgOrId, text, langCode) {
   }
 }
 
-// Listening Switch (Switch 1)
+// Listening Switch (with Screen Wake Lock + haptic)
 async function toggleListening() {
   if (!isListening) {
     if (!settings.apiKey) {
@@ -522,8 +688,10 @@ async function toggleListening() {
       });
       await audio.startListening();
       isListening = true;
+      haptic(15);
+      syncWakeLock();
       updateSwitchUI();
-      showToast('即時聆聽已開啟：外語自動翻中文，中文直接印出');
+      showToast('即時聆聽已開啟（螢幕自動防休眠）');
     } catch (err) {
       console.error(err);
       showToast(`無法啟動麥克風：${err.message}`, 3600);
@@ -531,6 +699,8 @@ async function toggleListening() {
   } else {
     audio.stopListening();
     isListening = false;
+    haptic(10);
+    syncWakeLock();
     updateSwitchUI();
     showToast('已關閉即時聆聽');
   }
@@ -600,61 +770,159 @@ async function processVadQueue() {
   updateHeaderStatus();
 }
 
-// Outbound Mode: "我說中文 -> 對方語言 (EN / JA / SV)"
-async function toggleManualChineseSpeak() {
-  if (!isManualRecording) {
-    if (!settings.apiKey) {
-      showToast('請先填入 Gemini API Key');
-      openSettings();
-      return;
-    }
-    try {
-      await audio.startManualCapture();
-      isManualRecording = true;
-      manualStartTime = Date.now();
-      els.speakChineseBtn.classList.add('recording');
-      els.cancelRecBtn.classList.add('visible');
-      updateManualTimer();
-      manualTimerHandle = setInterval(updateManualTimer, 250);
-      updateHeaderStatus();
-    } catch (err) {
-      console.error(err);
-      showToast(`無法啟動麥克風：${err.message}`, 3500);
-    }
-  } else {
-    clearInterval(manualTimerHandle);
-    manualTimerHandle = null;
-    isManualRecording = false;
-    els.speakChineseBtn.classList.remove('recording');
-    els.cancelRecBtn.classList.remove('visible');
-    updateSwitchUI();
+// Dual-Gesture Speak Button: Press-and-Hold (Walkie-Talkie) OR Tap-to-Toggle
+let speakPressActive = false;
+let speakPressDownTs = 0;
+let speakWasRecOnDown = false;
+let speakStarting = false;
+let speakPendingStop = false;
+let speakHoldMode = false;
 
-    const wav = audio.stopManualCapture();
-    if (!wav) {
-      showToast('錄音時間太短，請再試一次');
-      return;
-    }
+async function beginManualRecording() {
+  if (!settings.apiKey) {
+    showToast('請先填入 Gemini API Key');
+    openSettings();
+    return false;
+  }
+  speakStarting = true;
+  try {
+    await audio.startManualCapture();
+    speakStarting = false;
+    isManualRecording = true;
+    manualStartTime = Date.now();
+    haptic(15);
+    syncWakeLock();
+    els.speakChineseBtn.classList.add('recording');
+    els.cancelRecBtn.classList.add('visible');
+    if (els.cameraBtn) els.cameraBtn.classList.add('hidden');
+    updateManualTimer();
+    manualTimerHandle = setInterval(updateManualTimer, 250);
+    updateHeaderStatus();
 
-    await runOutboundTranslation({ wav });
+    if (speakPendingStop) {
+      speakPendingStop = false;
+      await finishManualRecording();
+    }
+    return true;
+  } catch (err) {
+    speakStarting = false;
+    speakPendingStop = false;
+    console.error(err);
+    showToast(`無法啟動麥克風：${err.message}`, 3500);
+    return false;
   }
 }
 
-function cancelManualChineseSpeak() {
+async function finishManualRecording() {
   if (!isManualRecording) return;
   clearInterval(manualTimerHandle);
   manualTimerHandle = null;
   isManualRecording = false;
-  audio.cancelManualCapture();
+  speakHoldMode = false;
+  haptic([12, 35, 18]);
+  syncWakeLock();
   els.speakChineseBtn.classList.remove('recording');
   els.cancelRecBtn.classList.remove('visible');
+  if (els.cameraBtn) els.cameraBtn.classList.remove('hidden');
+  updateSwitchUI();
+
+  const wav = audio.stopManualCapture();
+  if (!wav) {
+    showToast('錄音時間太短，請再試一次');
+    return;
+  }
+
+  await runOutboundTranslation({ wav });
+}
+
+function handleSpeakPointerDown(e) {
+  if (e.button && e.button > 0) return;
+  e.preventDefault();
+  try {
+    els.speakChineseBtn.setPointerCapture(e.pointerId);
+  } catch (_) {}
+
+  speakPressActive = true;
+  speakPressDownTs = performance.now();
+  speakWasRecOnDown = isManualRecording;
+
+  if (!isManualRecording && !speakStarting) {
+    speakHoldMode = true;
+    speakPendingStop = false;
+    beginManualRecording();
+  }
+}
+
+function handleSpeakPointerUp(e) {
+  if (!speakPressActive) return;
+  e.preventDefault();
+  speakPressActive = false;
+  const heldMs = performance.now() - speakPressDownTs;
+
+  if (speakWasRecOnDown) {
+    // Second tap stops tap-to-toggle recording
+    finishManualRecording();
+    return;
+  }
+
+  if (heldMs >= 380) {
+    // Walkie-talkie release: stop and translate immediately
+    if (speakStarting) {
+      speakPendingStop = true;
+    } else {
+      finishManualRecording();
+    }
+  } else {
+    // Quick tap (<380ms): stay in hands-free tap-to-toggle mode
+    speakHoldMode = false;
+    if (isManualRecording) updateManualTimer();
+  }
+}
+
+function handleSpeakPointerCancel() {
+  speakPressActive = false;
+  speakHoldMode = false;
+  if (isManualRecording) updateManualTimer();
+}
+
+function cancelManualChineseSpeak() {
+  if (!isManualRecording && !speakStarting) return;
+  speakPendingStop = false;
+  speakPressActive = false;
+  speakHoldMode = false;
+  clearInterval(manualTimerHandle);
+  manualTimerHandle = null;
+  isManualRecording = false;
+  audio.cancelManualCapture();
+  haptic(10);
+  syncWakeLock();
+  els.speakChineseBtn.classList.remove('recording');
+  els.cancelRecBtn.classList.remove('visible');
+  if (els.cameraBtn) els.cameraBtn.classList.remove('hidden');
   updateSwitchUI();
   showToast('已取消錄音');
 }
 
 function updateManualTimer() {
   const sec = Math.floor((Date.now() - manualStartTime) / 1000);
-  const langInfo = TARGET_LANGUAGES[settings.targetLang] || TARGET_LANGUAGES.en;
-  els.speakBtnLabel.textContent = `錄音中 ${sec}s — 再點一下翻成${langInfo.label}`;
+  els.speakBtnLabel.textContent = speakHoldMode
+    ? `收音中 ${sec}s — 放開立即翻譯`
+    : `錄音中 ${sec}s — 再點一下自動翻譯`;
+}
+
+function toggleKeyboardInput(forceState) {
+  const willOpen =
+    typeof forceState === 'boolean'
+      ? forceState
+      : els.quickTextRow.classList.contains('collapsed');
+  els.quickTextRow.classList.toggle('collapsed', !willOpen);
+  els.keyboardToggleBtn.classList.toggle('active', willOpen);
+  haptic(8);
+  if (willOpen) {
+    requestAnimationFrame(() => els.quickChineseInput.focus());
+  } else {
+    els.quickChineseInput.blur();
+  }
 }
 
 async function handleQuickTextSend() {
@@ -667,6 +935,7 @@ async function handleQuickTextSend() {
   }
   els.quickChineseInput.value = '';
   els.quickChineseInput.blur();
+  haptic(10);
   await audio.ensureContext().catch(() => {});
   await runOutboundTranslation({ textInput: text });
 }
@@ -689,22 +958,33 @@ async function runOutboundTranslation({ wav = null, textInput = null }) {
     });
 
     if (!result) {
-      showToast('沒有辨識到清晰的中文內容，請再說一次');
+      showToast('沒有辨識到清晰的語音或文字，請再試一次');
       return;
     }
 
-    const msg = {
-      id: makeId(),
-      direction: 'outbound',
-      speaker: '我',
-      lang: 'zh',
-      targetLang: result.targetLang,
-      isChinese: true,
-      zh: result.zh,
-      translated: result.translated,
-      reading: result.reading,
-      time: nowTimeStr(),
-    };
+    const msg = result.isSourceChinese
+      ? {
+          id: makeId(),
+          direction: 'outbound',
+          speaker: '我',
+          lang: 'zh',
+          targetLang: result.targetLang,
+          isChinese: true,
+          zh: result.sourceText,
+          translated: result.translated,
+          reading: result.reading,
+          time: nowTimeStr(),
+        }
+      : {
+          id: makeId(),
+          direction: 'inbound',
+          speaker: '譯',
+          lang: result.sourceLang,
+          isChinese: false,
+          original: result.sourceText,
+          zh: result.translated,
+          time: nowTimeStr(),
+        };
 
     messages.push(msg);
     saveState();
@@ -718,22 +998,128 @@ async function runOutboundTranslation({ wav = null, textInput = null }) {
   }
 }
 
-// Show Card ("放大給對方看")
+// Photo / Menu / Document Translation (Client-side JPEG compression -> Gemini multimodal)
+function compressImageFile(file, maxDim = 1280, quality = 0.82) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const makeCanvasDataUrl = (limit, q) => {
+          let { width, height } = img;
+          const scale = Math.min(1, limit / Math.max(width, height));
+          width = Math.max(1, Math.round(width * scale));
+          height = Math.max(1, Math.round(height * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+          return canvas.toDataURL('image/jpeg', q);
+        };
+        const apiDataUrl = makeCanvasDataUrl(maxDim, quality);
+        const thumbUrl = makeCanvasDataUrl(220, 0.65);
+        const base64 = apiDataUrl.split(',')[1];
+        resolve({ base64, mimeType: 'image/jpeg', thumbUrl });
+      } catch (err) {
+        reject(err);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('無法讀取這張圖片'));
+    };
+    img.src = url;
+  });
+}
+
+async function handlePhotoFileSelected(file) {
+  if (!file) return;
+  if (!settings.apiKey) {
+    showToast('請先填入 Gemini API Key 才能使用拍照翻譯');
+    openSettings();
+    return;
+  }
+
+  haptic(12);
+  pendingCount += 1;
+  renderFeed();
+  updateHeaderStatus();
+  showToast('正在辨識圖片並翻譯⋯', 2200);
+
+  try {
+    const { base64, mimeType, thumbUrl } = await compressImageFile(file);
+    const result = await translateImageWithGemini({
+      apiKey: settings.apiKey,
+      model: settings.model,
+      imageBase64: base64,
+      mimeType,
+      targetLang: settings.targetLang,
+    });
+
+    if (!result) {
+      showToast('圖片翻譯失敗，請換一張更清晰的照片再試');
+      return;
+    }
+
+    const msg = {
+      id: makeId(),
+      type: 'photo',
+      direction: 'inbound',
+      speaker: '拍照',
+      lang: result.sourceLang,
+      targetLang: result.targetLang,
+      isSourceChinese: result.isSourceChinese,
+      isChinese: result.isSourceChinese,
+      title: result.title,
+      summary: result.summary,
+      zh: result.summary,
+      items: result.items,
+      thumbUrl,
+      time: nowTimeStr(),
+    };
+
+    messages.push(msg);
+    saveState();
+    haptic([10, 30, 14]);
+  } catch (err) {
+    console.error('Photo translate error:', err);
+    showToast(err.message, 3800);
+  } finally {
+    if (pendingCount > 0) pendingCount -= 1;
+    renderFeed();
+    updateHeaderStatus();
+  }
+}
+
+// Show Card ("面對面破冰大字卡")
 function openShowcard(msg) {
   activeShowcardMsg = msg;
   const isOutbound = msg.direction === 'outbound';
+  const displayLang = isOutbound ? msg.targetLang : 'zh';
+  const bannerText = ICEBREAKER_BANNERS[displayLang] || ICEBREAKER_BANNERS.en;
+  const flagHtml = FLAG_SVG_MAP[displayLang] || '';
+
+  if (els.showcardBanner) {
+    els.showcardBanner.innerHTML = `${flagHtml}<span>${bannerText}</span>`;
+  }
   els.showcardMain.textContent = isOutbound ? msg.translated : msg.zh;
   els.showcardReading.textContent = isOutbound && msg.reading ? msg.reading : '';
   els.showcardSub.textContent = isOutbound ? msg.zh : (!msg.isChinese ? msg.original : '');
   els.showcardContent.classList.remove('flipped');
   els.showcardOverlay.classList.add('open');
   els.showcardOverlay.setAttribute('aria-hidden', 'false');
+  haptic(10);
+  syncWakeLock();
 }
 
 function closeShowcard() {
   els.showcardOverlay.classList.remove('open');
   els.showcardOverlay.setAttribute('aria-hidden', 'true');
   activeShowcardMsg = null;
+  syncWakeLock();
 }
 
 // Settings Sheet
@@ -794,6 +1180,12 @@ async function exportTranscript() {
   }
 
   const lines = messages.map((m) => {
+    if (m.type === 'photo') {
+      const itemsText = (m.items || [])
+        .map((it) => `    - ${it.translated}${it.original ? ` (${it.original})` : ''}${it.note ? ` [${it.note}]` : ''}`)
+        .join('\n');
+      return `[${m.time}] 📷 ${m.title || '拍照翻譯'}: ${m.summary || ''}${itemsText ? `\n${itemsText}` : ''}`;
+    }
     const sp = displaySpeakerName(m.speaker, m.direction === 'outbound');
     if (m.direction === 'outbound') {
       const targetInfo = TARGET_LANGUAGES[m.targetLang] || TARGET_LANGUAGES.en;
@@ -889,7 +1281,7 @@ function loadDemoConversation() {
   ];
   saveState();
   renderFeed();
-  showToast('已載入英・日・瑞典・中多語示範！點 A/B/C 可改名，點 🔊 可試聽');
+  showToast('已載入多語示範！點文字可放大給對方看，點 🔊 可試聽');
 }
 
 // Audio Callbacks
@@ -912,7 +1304,7 @@ audio.onLevel = (rms, mode) => {
 audio.onVadStateChange = (speaking) => {
   els.vadStatus.textContent = speaking
     ? '偵測到人聲，收音中⋯停頓後將自動翻譯'
-    : '聆聽環境聲音中⋯聽到說話會自動斷句翻譯';
+    : '聆聽環境聲音中⋯停頓會自動翻譯';
 };
 
 audio.onVadSegment = (wav) => {
@@ -927,10 +1319,22 @@ audio.onPlaybackChange = () => {
 // Event Wiring
 els.listenSwitch.addEventListener('click', toggleListening);
 
+if (els.toneQuickBtn) {
+  els.toneQuickBtn.addEventListener('click', () => {
+    const idx = TONE_ORDER.indexOf(settings.tone);
+    settings.tone = TONE_ORDER[(idx + 1) % TONE_ORDER.length];
+    haptic(10);
+    saveState();
+    updateSwitchUI();
+    showToast((TONE_META[settings.tone] || TONE_META.natural).toast, 2200);
+  });
+}
+
 els.langBar.addEventListener('click', (e) => {
   const pill = e.target.closest('.lang-pill');
   if (!pill) return;
   settings.targetLang = pill.dataset.lang;
+  haptic(8);
   saveState();
   updateSwitchUI();
 });
@@ -942,14 +1346,43 @@ els.flushBtn.addEventListener('click', () => {
   }
 });
 
-els.speakChineseBtn.addEventListener('click', toggleManualChineseSpeak);
+// Dual-gesture speak button (Hold-to-speak OR Tap-to-toggle)
+els.speakChineseBtn.addEventListener('pointerdown', handleSpeakPointerDown);
+els.speakChineseBtn.addEventListener('pointerup', handleSpeakPointerUp);
+els.speakChineseBtn.addEventListener('pointercancel', handleSpeakPointerCancel);
+els.speakChineseBtn.addEventListener('contextmenu', (e) => e.preventDefault());
 els.cancelRecBtn.addEventListener('click', cancelManualChineseSpeak);
+
+// Collapsible keyboard text input
+if (els.keyboardToggleBtn) {
+  els.keyboardToggleBtn.addEventListener('click', () => toggleKeyboardInput());
+}
+
+// Camera / Photo translation
+if (els.cameraBtn && els.cameraInput) {
+  els.cameraBtn.addEventListener('click', () => {
+    if (!settings.apiKey) {
+      showToast('請先填入 Gemini API Key 才能使用拍照翻譯');
+      openSettings();
+      return;
+    }
+    haptic(8);
+    els.cameraInput.click();
+  });
+  els.cameraInput.addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (file) handlePhotoFileSelected(file);
+  });
+}
 
 els.quickSendBtn.addEventListener('click', handleQuickTextSend);
 els.quickChineseInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.isComposing) {
     e.preventDefault();
     handleQuickTextSend();
+  } else if (e.key === 'Escape') {
+    toggleKeyboardInput(false);
   }
 });
 

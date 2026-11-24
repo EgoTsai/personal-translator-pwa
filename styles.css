@@ -243,6 +243,29 @@ button {
   gap: 6px;
 }
 
+.tone-chip {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-secondary);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  white-space: nowrap;
+}
+
+.tone-chip.polite {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: rgba(14, 90, 90, 0.28);
+}
+
+.tone-chip:active {
+  transform: scale(0.95);
+}
+
 .icon-btn {
   width: 36px;
   height: 36px;
@@ -599,18 +622,30 @@ button {
   transform: scale(0.97);
 }
 
-/* Utterance Card */
+/* Utterance Card (Left: others / Right: me / Full: photo) */
 .utterance-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 12px 14px;
+  border-radius: 16px 16px 16px 6px;
+  padding: 11px 13px;
   box-shadow: var(--shadow-sm);
+  align-self: flex-start;
+  width: min(91%, 440px);
 }
 
 .utterance-card.outbound {
+  align-self: flex-end;
   background: var(--bg-outbound);
   border-color: rgba(14, 90, 90, 0.22);
+  border-right: 3.5px solid var(--accent);
+  border-left: 1px solid rgba(14, 90, 90, 0.22);
+  border-radius: 16px 16px 6px 16px;
+}
+
+.utterance-card.photo-card {
+  align-self: stretch;
+  width: 100%;
+  border-radius: var(--radius-md);
   border-left: 3.5px solid var(--accent);
 }
 
@@ -641,6 +676,77 @@ button {
   border-left: 3.5px solid var(--sp-d-ink);
 }
 .utterance-card.card-sp-d .utterance-main { color: var(--sp-d-text); }
+
+.utterance-main-text {
+  cursor: pointer;
+}
+
+/* Photo Menu / Document Card */
+.photo-hero {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  margin-top: 2px;
+}
+
+.photo-thumb {
+  width: 68px;
+  height: 68px;
+  border-radius: 10px;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+
+.photo-summary-box {
+  flex: 1;
+  min-width: 0;
+}
+
+.photo-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+
+.photo-items {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.photo-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 9px;
+  border-radius: 10px;
+  background: var(--bg-app);
+  border: 1px solid var(--border);
+}
+
+.photo-item-zh {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.45;
+}
+
+.photo-item-orig {
+  font-size: 12.5px;
+  color: var(--ink-secondary);
+  line-height: 1.4;
+}
+
+.photo-item-note {
+  font-size: 11.5px;
+  color: var(--accent);
+}
 
 .speaker-picker {
   display: flex;
@@ -926,6 +1032,10 @@ button {
   gap: 8px;
 }
 
+.quick-text-row.collapsed {
+  display: none;
+}
+
 .text-input-wrap {
   flex: 1;
   display: flex;
@@ -979,6 +1089,38 @@ button {
   gap: 8px;
 }
 
+.dock-icon-btn {
+  width: 48px;
+  height: 52px;
+  border-radius: 14px;
+  background: var(--bg-subtle);
+  color: var(--ink-secondary);
+  border: 1px solid var(--border);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.dock-icon-btn:active {
+  transform: scale(0.95);
+}
+
+.dock-icon-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: rgba(14, 90, 90, 0.3);
+}
+
+.dock-icon-btn.hidden {
+  display: none;
+}
+
+.dock-icon-btn svg {
+  width: 21px;
+  height: 21px;
+}
+
 .speak-chinese-btn {
   flex: 1;
   height: 52px;
@@ -988,13 +1130,17 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  font-size: 15px;
+  gap: 8px;
+  padding: 0 12px;
+  font-size: 14.5px;
   font-weight: 700;
   letter-spacing: 0.01em;
   box-shadow: 0 4px 14px rgba(14, 90, 90, 0.22);
   transition: background 0.18s ease, transform 0.1s ease, box-shadow 0.18s ease;
   user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: none;
 }
 
 .speak-chinese-btn:active {
@@ -1008,8 +1154,8 @@ button {
 }
 
 .speak-chinese-btn svg {
-  width: 20px;
-  height: 20px;
+  width: 19px;
+  height: 19px;
   flex-shrink: 0;
 }
 
@@ -1244,6 +1390,23 @@ button {
   transform: rotate(180deg);
 }
 
+.showcard-polite-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.showcard-polite-banner:empty {
+  display: none;
+}
+
 .showcard-main {
   font-size: clamp(28px, 8vw, 44px);
   font-weight: 700;
@@ -1266,6 +1429,13 @@ button {
   display: flex;
   justify-content: center;
   gap: 12px;
+}
+
+.showcard-speak-btn {
+  min-width: 190px;
+  height: 48px;
+  border-radius: 14px;
+  font-size: 15px;
 }
 
 /* Toast Notification */
