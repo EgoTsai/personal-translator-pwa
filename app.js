@@ -271,6 +271,7 @@ const FLAG_SVG_MAP = {
 const SPEAKER_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path class="sp-wave-1" d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path class="sp-wave-2" d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
 
 let loadingSpeakId = null;
+let openSpeakerPickerMsgId = null;
 
 function syncPlaybackButtons() {
   const activeId = audio.playingId;
@@ -310,9 +311,12 @@ function createMessageCard(msg) {
   spBtn.type = 'button';
   spBtn.className = `speaker-badge ${spClass}`;
   spBtn.textContent = msg.speaker === '譯' ? '譯' : `${spName}:`;
-  spBtn.title = isOutbound || msg.speaker === '譯' ? '自動互譯' : '點擊重新命名這位說話者';
+  spBtn.title = isOutbound || msg.speaker === '譯' ? '自動互譯' : '點擊切換說話者顏色（A/B/C/D）或改名';
   if (!isOutbound && msg.speaker !== '譯') {
-    spBtn.addEventListener('click', () => renameSpeaker(msg.speaker));
+    spBtn.addEventListener('click', () => {
+      openSpeakerPickerMsgId = openSpeakerPickerMsgId === msg.id ? null : msg.id;
+      renderFeed();
+    });
   }
 
   const langTag = document.createElement('span');
@@ -366,6 +370,35 @@ function createMessageCard(msg) {
   actions.append(expandBtn, copyBtn);
   top.append(spGroup, actions);
   card.appendChild(top);
+
+  if (!isOutbound && openSpeakerPickerMsgId === msg.id) {
+    const picker = document.createElement('div');
+    picker.className = 'speaker-picker';
+    ['A', 'B', 'C', 'D'].forEach((code) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      const cls = speakerColorClass(code, false);
+      b.className = `speaker-pick-btn speaker-badge ${cls}${msg.speaker === code ? ' active' : ''}`;
+      b.textContent = displaySpeakerName(code, false);
+      b.addEventListener('click', () => {
+        msg.speaker = code;
+        openSpeakerPickerMsgId = null;
+        saveState();
+        renderFeed();
+      });
+      picker.appendChild(b);
+    });
+    const ren = document.createElement('button');
+    ren.type = 'button';
+    ren.className = 'speaker-pick-rename';
+    ren.textContent = '改名';
+    ren.addEventListener('click', () => {
+      openSpeakerPickerMsgId = null;
+      renameSpeaker(msg.speaker);
+    });
+    picker.appendChild(ren);
+    card.appendChild(picker);
+  }
 
   const makeInlineSpeakBtn = (cacheId, textToSpeak, langCode, subtle = false) => {
     const playing = audio.playingId === cacheId;

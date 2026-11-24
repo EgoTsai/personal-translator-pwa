@@ -610,32 +610,71 @@ button {
 
 .utterance-card.outbound {
   background: var(--bg-outbound);
-  border-color: rgba(14, 90, 90, 0.20);
+  border-color: rgba(14, 90, 90, 0.22);
+  border-left: 3.5px solid var(--accent);
 }
 
 .utterance-card.card-sp-a {
   background: var(--sp-a-card);
   border-color: var(--sp-a-border);
+  border-left: 3.5px solid var(--sp-a-ink);
 }
 .utterance-card.card-sp-a .utterance-main { color: var(--sp-a-text); }
 
 .utterance-card.card-sp-b {
   background: var(--sp-b-card);
   border-color: var(--sp-b-border);
+  border-left: 3.5px solid var(--sp-b-ink);
 }
 .utterance-card.card-sp-b .utterance-main { color: var(--sp-b-text); }
 
 .utterance-card.card-sp-c {
   background: var(--sp-c-card);
   border-color: var(--sp-c-border);
+  border-left: 3.5px solid var(--sp-c-ink);
 }
 .utterance-card.card-sp-c .utterance-main { color: var(--sp-c-text); }
 
 .utterance-card.card-sp-d {
   background: var(--sp-d-card);
   border-color: var(--sp-d-border);
+  border-left: 3.5px solid var(--sp-d-ink);
 }
 .utterance-card.card-sp-d .utterance-main { color: var(--sp-d-text); }
+
+.speaker-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: var(--bg-app);
+  border: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.speaker-pick-btn {
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  border: 1px solid transparent;
+}
+
+.speaker-pick-btn.active {
+  border-color: currentColor;
+}
+
+.speaker-pick-rename {
+  margin-left: auto;
+  padding: 3px 8px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  font-weight: 600;
+  background: var(--bg-subtle);
+  color: var(--ink-secondary);
+}
 
 .flag-svg {
   width: 20px;
