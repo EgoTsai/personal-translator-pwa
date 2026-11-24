@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>隨身口譯官 — 英・日・瑞典 ↔ 中文專屬語音翻譯</title>
+  <meta name="description" content="使用 Google Gemini API 的個人專屬手機即時口譯官，支援英、日、瑞典語與繁體中文雙向語音翻譯、說話者標註與 AI 真人朗讀。" />
+  <meta name="theme-color" content="#0F5C5C" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="隨身口譯官" />
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+  <link rel="apple-touch-icon" href="./icon-192.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app-shell" id="appShell">
+    <!-- Top Header -->
+    <header class="top-header">
+      <div class="header-row">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">譯</div>
+          <div class="brand-text">
+            <h1 class="brand-title">隨身口譯官</h1>
+            <div class="status-line">
+              <span class="status-dot ready" id="statusDot"></span>
+              <span id="statusText">待命中</span>
+            </div>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button class="icon-btn" id="themeBtn" type="button" title="切換深淺主題" aria-label="切換深淺主題">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+          </button>
+          <button class="icon-btn" id="exportBtn" type="button" title="匯出對話紀錄" aria-label="匯出對話紀錄">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+          </button>
+          <button class="icon-btn" id="clearBtn" type="button" title="清除對話" aria-label="清除對話">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+              <path d="M10 11v6M14 11v6"/>
+            </svg>
+          </button>
+          <button class="icon-btn" id="settingsBtn" type="button" title="API Key 與設定" aria-label="API Key 與設定">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Counterpart Language Switcher (for Outbound Chinese -> Target Language) -->
+      <nav class="lang-bar" id="langBar" aria-label="對方語言選擇">
+        <button class="lang-pill active" type="button" data-lang="en">
+          <span class="flag" aria-hidden="true">🇬🇧</span><span>英語 ↔ 中</span>
+        </button>
+        <button class="lang-pill" type="button" data-lang="ja">
+          <span class="flag" aria-hidden="true">🇯🇵</span><span>日語 ↔ 中</span>
+        </button>
+        <button class="lang-pill" type="button" data-lang="sv">
+          <span class="flag" aria-hidden="true">🇸🇪</span><span>瑞典 ↔ 中</span>
+        </button>
+      </nav>
+    </header>
+
+    <!-- Primary Two Switches -->
+    <section class="switch-deck" aria-label="核心翻譯開關">
+      <button class="switch-card" id="listenSwitch" type="button" role="switch" aria-checked="false">
+        <div class="switch-meta">
+          <span class="switch-label">即時聆聽翻譯</span>
+          <span class="switch-sub" id="listenSub">開啟自動收音辨識</span>
+        </div>
+        <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+      </button>
+
+      <button class="switch-card" id="ttsSwitch" type="button" role="switch" aria-checked="false">
+        <div class="switch-meta">
+          <span class="switch-label">AI 真人唸出</span>
+          <span class="switch-sub" id="ttsSub">已關閉・點單句可播</span>
+        </div>
+        <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+      </button>
+    </section>
+
+    <!-- Live VAD Waveform Bar (visible while Listening Switch is ON) -->
+    <div class="listen-strip" id="listenStrip">
+      <div class="listen-strip-left">
+        <div class="wave-bars" id="waveBars" aria-hidden="true">
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <span id="vadStatus">聆聽環境聲音中⋯聽到說話會自動斷句翻譯</span>
+      </div>
+      <button class="flush-btn" id="flushBtn" type="button">立即送出</button>
+    </div>
+
+    <!-- API Key Setup Prompt Banner -->
+    <div class="setup-banner hidden" id="setupBanner">
+      <span>尚未填入 Gemini API Key（僅存於本機）</span>
+      <div class="setup-banner-actions">
+        <button class="banner-btn secondary" id="bannerDemoBtn" type="button">看示範</button>
+        <button class="banner-btn" id="bannerSetupBtn" type="button">去設定</button>
+      </div>
+    </div>
+
+    <!-- Transcript Stream -->
+    <main class="transcript-feed" id="transcriptFeed" aria-live="polite">
+      <div class="empty-state" id="emptyState">
+        <div class="empty-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+        </div>
+        <h2 class="empty-title">準備就緒，隨時開始翻譯</h2>
+        <p class="empty-desc">打開上方開關即可自動收音；按下方按鈕把你的中文翻成對方語言並唸出來。</p>
+        <div class="empty-tips">
+          <div class="tip-row">
+            <span class="tip-badge">開關 1</span>
+            <span><strong>即時聆聽翻譯</strong>：聽到外語自動翻成繁體中文，聽到中文直接印出，並自動標註 A / B 說話者（點擊代號可改名）。</span>
+          </div>
+          <div class="tip-row">
+            <span class="tip-badge">開關 2</span>
+            <span><strong>AI 真人唸出</strong>：開啟後自動以自然真人語音播報譯文；關閉時可省額度，隨時點擊任一句旁的喇叭單獨播報。</span>
+          </div>
+        </div>
+        <button class="demo-btn" id="emptyDemoBtn" type="button">
+          載入英・日・瑞典多語示範對話
+        </button>
+      </div>
+    </main>
+
+    <!-- Bottom Outbound Dock (My Chinese -> Target Language) -->
+    <footer class="bottom-dock">
+      <div class="quick-text-row">
+        <div class="text-input-wrap">
+          <input
+            type="text"
+            id="quickChineseInput"
+            placeholder="或直接輸入中文，翻成英語給對方聽⋯"
+            autocomplete="off"
+          />
+          <button class="send-text-btn" id="quickSendBtn" type="button">翻譯</button>
+        </div>
+      </div>
+
+      <div class="speak-row">
+        <button class="speak-chinese-btn" id="speakChineseBtn" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+          </svg>
+          <span id="speakBtnLabel">點擊說中文 → 翻成英語</span>
+        </button>
+        <button class="cancel-rec-btn" id="cancelRecBtn" type="button">取消</button>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Settings Bottom Sheet -->
+  <div class="sheet-backdrop" id="settingsSheet" aria-hidden="true">
+    <div class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="settingsHeading">
+      <div class="sheet-header">
+        <h2 class="sheet-title" id="settingsHeading">專屬口譯官設定</h2>
+        <button class="icon-btn" id="closeSettingsBtn" type="button" aria-label="關閉設定">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="sheet-body">
+        <div class="field-group">
+          <label class="field-label" for="apiKeyInput">
+            <span>Gemini API Key</span>
+            <button type="button" id="toggleKeyVisibility" style="font-size:12px;color:var(--accent);font-weight:600;">顯示</button>
+          </label>
+          <div class="input-row">
+            <input
+              type="password"
+              id="apiKeyInput"
+              class="text-control"
+              placeholder="AIzaSy..."
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button class="btn-secondary" id="testKeyBtn" type="button">測試連線</button>
+          </div>
+          <div class="test-result" id="testResult"></div>
+          <span class="field-hint">Key 只會儲存在你這台手機瀏覽器的 localStorage，直接向 Google Gemini API 發送，不經過任何第三方伺服器。</span>
+        </div>
+
+        <details class="guide-details">
+          <summary>如何領取 Google AI Pro 每月 $10 免費 API 額度？</summary>
+          <ol>
+            <li>用訂閱 Google AI Pro 的主帳號登入 <a href="https://aistudio.google.com/" target="_blank" rel="noopener">Google AI Studio</a>。</li>
+            <li>點左下角選單的 <strong>Claim free API credits / Redeem credits</strong>，依引導綁定 Cloud Billing 帳單帳戶並勾選自動套用未來每月贈送額度（新預付帳戶需預存 $5 啟用，系統會優先扣除免費贈送額度，也可設定每月花費上限）。</li>
+            <li>在左側 <strong>API keys</strong> 建立並複製你的付費 API Key，貼回上方即可使用！每月 $10 額度單月未用完可累計保留 12 個月。</li>
+          </ol>
+        </details>
+
+        <div class="field-group">
+          <label class="field-label" for="modelSelect">語音辨識與翻譯模型</label>
+          <select id="modelSelect" class="select-control">
+            <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite（最省額度・超快反應）</option>
+            <option value="gemini-3.8-flash">Gemini 3.8 Flash（均衡高速・高精準）</option>
+            <option value="gemini-4-hydrogen">Gemini 4 Hydrogen（新一代主力・音訊直譯）</option>
+            <option value="gemini-4-neon">Gemini 4 Neon（旗艦極致語意・精準口譯）</option>
+          </select>
+          <span class="field-hint">支援原生語音輸入！日常省額度推薦 3.5 Flash-Lite；追求最精準的瑞典語／日語道地語意可切換 <strong>Gemini 4 Neon</strong>（已自動開啟 minimal 思考模式加快速度）。</span>
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="ttsModelSelect">語音朗讀引擎（AI 真人唸出）</label>
+          <select id="ttsModelSelect" class="select-control">
+            <option value="gemini-3.8-flash-lite-tts">Gemini 3.8 Flash-Lite TTS（推薦・自然快速且省額度）</option>
+            <option value="gemini-3.8-flash-tts">Gemini 3.8 Flash TTS（旗艦錄音室音質）</option>
+            <option value="browser">手機瀏覽器內建語音（完全免費、不耗 API）</option>
+          </select>
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="voiceSelect">AI 朗讀音色</label>
+          <div class="input-row">
+            <select id="voiceSelect" class="select-control">
+              <option value="Kore">Kore（清晰自然女聲）</option>
+              <option value="Aoede">Aoede（溫柔親切女聲）</option>
+              <option value="Puck">Puck（自然開朗男聲）</option>
+              <option value="Charon">Charon（沉穩知性男聲）</option>
+              <option value="Zephyr">Zephyr（明亮中性嗓音）</option>
+            </select>
+            <button class="btn-secondary" id="testVoiceBtn" type="button">試聽</button>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="toneSelect">我說中文 → 對方語言的預設語氣</label>
+          <select id="toneSelect" class="select-control">
+            <option value="natural">日常自然得體（預設）</option>
+            <option value="polite">商務／禮貌敬語（日文使用丁寧語）</option>
+            <option value="casual">輕鬆親切口語（朋友聊天）</option>
+          </select>
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="silenceSelect">聆聽模式自動斷句速度</label>
+          <select id="silenceSelect" class="select-control">
+            <option value="950">快速（停頓 0.95 秒送出）</option>
+            <option value="1300" selected>標準（停頓 1.3 秒送出）</option>
+            <option value="1800">從容（停頓 1.8 秒送出，適合講話較慢）</option>
+          </select>
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="vadThresholdSelect">麥克風收音靈敏度</label>
+          <select id="vadThresholdSelect" class="select-control">
+            <option value="0.012">高靈敏（安靜室內・距離較遠）</option>
+            <option value="0.018" selected>標準（一般對話環境）</option>
+            <option value="0.032">抗噪（咖啡廳、街道等較吵雜處）</option>
+          </select>
+        </div>
+
+        <label class="setting-row">
+          <span>
+            <strong style="display:block;font-size:13.5px;">顯示外語原文對照</strong>
+            <span class="field-hint">在中文譯文下方同步顯示聽到的英／日／瑞典原文</span>
+          </span>
+          <input type="checkbox" id="showOriginalCheck" checked />
+        </label>
+
+        <button class="btn-primary" id="saveSettingsBtn" type="button">儲存設定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Full-Screen Show Card ("放大給對方看") -->
+  <div class="showcard-overlay" id="showcardOverlay" aria-hidden="true">
+    <div class="showcard-bar">
+      <button class="btn-secondary" id="flipShowcardBtn" type="button">上下翻轉給對方看</button>
+      <button class="btn-secondary" id="closeShowcardBtn" type="button">關閉</button>
+    </div>
+    <div class="showcard-content" id="showcardContent">
+      <div class="showcard-main" id="showcardMain"></div>
+      <div class="showcard-reading" id="showcardReading"></div>
+      <div class="showcard-sub" id="showcardSub"></div>
+    </div>
+    <div class="showcard-footer">
+      <button class="btn-primary" id="speakShowcardBtn" type="button">AI 真人唸出來</button>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

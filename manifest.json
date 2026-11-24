@@ -1,0 +1,32 @@
+{
+  "name": "隨身口譯官 — 專屬語音翻譯",
+  "short_name": "隨身口譯官",
+  "description": "使用 Gemini API 的個人專屬手機即時語音翻譯官，支援英／日／瑞典語與繁體中文雙向口譯與說話者標註。",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F6F5F0",
+  "theme_color": "#0F5C5C",
+  "lang": "zh-Hant",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
