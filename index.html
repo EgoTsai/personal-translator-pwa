@@ -15,7 +15,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=1.5" />
+  <link rel="stylesheet" href="./styles.css?v=1.6" />
 </head>
 <body>
   <div class="app-shell" id="appShell">
@@ -27,7 +27,7 @@
           <div class="brand-text">
             <div class="brand-title-row" style="display:flex;align-items:center;gap:6px;white-space:nowrap;">
               <h1 class="brand-title">隨身口譯官</h1>
-              <button type="button" class="version-badge" id="versionBadge" title="點擊重新載入最新版本">v1.5</button>
+              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v1.6</button>
             </div>
             <div class="status-line">
               <span class="status-dot ready" id="statusDot"></span>
@@ -36,18 +36,6 @@
           </div>
         </div>
         <div class="header-actions">
-          <button class="icon-btn" id="themeBtn" type="button" title="切換深淺主題" aria-label="切換深淺主題">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-            </svg>
-          </button>
-          <button class="icon-btn" id="exportBtn" type="button" title="匯出對話紀錄" aria-label="匯出對話紀錄">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-              <polyline points="7 10 12 15 17 10"/>
-              <line x1="12" y1="15" x2="12" y2="3"/>
-            </svg>
-          </button>
           <button class="icon-btn" id="clearBtn" type="button" title="清除對話" aria-label="清除對話">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="3 6 5 6 21 6"/>
@@ -55,7 +43,7 @@
               <path d="M10 11v6M14 11v6"/>
             </svg>
           </button>
-          <button class="icon-btn" id="settingsBtn" type="button" title="API Key 與設定" aria-label="API Key 與設定">
+          <button class="icon-btn" id="settingsBtn" type="button" title="設定" aria-label="設定">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="12" cy="12" r="3"/>
               <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -64,34 +52,26 @@
         </div>
       </div>
 
-      <!-- Counterpart Language Switcher (for Outbound Chinese -> Target Language) -->
+      <!-- Counterpart Language Switcher -->
       <nav class="lang-bar" id="langBar" aria-label="對方語言選擇">
         <button class="lang-pill active" type="button" data-lang="en">
-          <span class="flag" aria-hidden="true">🇬🇧</span><span>英語 ↔ 中</span>
+          <span class="flag" aria-hidden="true">🇬🇧</span><span>英語</span>
         </button>
         <button class="lang-pill" type="button" data-lang="ja">
-          <span class="flag" aria-hidden="true">🇯🇵</span><span>日語 ↔ 中</span>
+          <span class="flag" aria-hidden="true">🇯🇵</span><span>日語</span>
         </button>
         <button class="lang-pill" type="button" data-lang="sv">
-          <span class="flag" aria-hidden="true">🇸🇪</span><span>瑞典 ↔ 中</span>
+          <span class="flag" aria-hidden="true">🇸🇪</span><span>瑞典語</span>
         </button>
       </nav>
     </header>
 
-    <!-- Primary Two Switches -->
-    <section class="switch-deck" aria-label="核心翻譯開關">
+    <!-- Single Clean Listening Switch -->
+    <section class="switch-deck" aria-label="即時聆聽翻譯開關">
       <button class="switch-card" id="listenSwitch" type="button" role="switch" aria-checked="false">
         <div class="switch-meta">
           <span class="switch-label">即時聆聽翻譯</span>
-          <span class="switch-sub" id="listenSub">開啟自動收音辨識</span>
-        </div>
-        <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
-      </button>
-
-      <button class="switch-card" id="ttsSwitch" type="button" role="switch" aria-checked="false">
-        <div class="switch-meta">
-          <span class="switch-label">AI 真人唸出</span>
-          <span class="switch-sub" id="ttsSub">已關閉・點單句可播</span>
+          <span class="switch-sub" id="listenSub">外語自動翻中文・中文直接印出（標註 A / B）</span>
         </div>
         <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
       </button>
@@ -103,7 +83,7 @@
         <div class="wave-bars" id="waveBars" aria-hidden="true">
           <span></span><span></span><span></span><span></span><span></span>
         </div>
-        <span id="vadStatus">聆聽環境聲音中⋯聽到說話會自動斷句翻譯</span>
+        <span id="vadStatus">聆聽環境聲音中⋯停頓會自動翻譯</span>
       </div>
       <button class="flush-btn" id="flushBtn" type="button">立即送出</button>
     </div>
@@ -128,21 +108,9 @@
             <line x1="8" y1="23" x2="16" y2="23"/>
           </svg>
         </div>
-        <h2 class="empty-title">準備就緒，隨時開始翻譯</h2>
-        <p class="empty-desc">打開上方開關即可自動收音；按下方按鈕把你的中文翻成對方語言並唸出來。</p>
-        <div class="empty-tips">
-          <div class="tip-row">
-            <span class="tip-badge">開關 1</span>
-            <span><strong>即時聆聽翻譯</strong>：聽到外語自動翻成繁體中文，聽到中文直接印出，並自動標註 A / B 說話者（點擊代號可改名）。</span>
-          </div>
-          <div class="tip-row">
-            <span class="tip-badge">開關 2</span>
-            <span><strong>AI 真人唸出</strong>：開啟後自動以自然真人語音播報譯文；關閉時可省額度，隨時點擊任一句旁的喇叭單獨播報。</span>
-          </div>
-        </div>
-        <button class="demo-btn" id="emptyDemoBtn" type="button">
-          載入英・日・瑞典多語示範對話
-        </button>
+        <h2 class="empty-title">隨時開始口譯</h2>
+        <p class="empty-desc">打開上方「即時聆聽翻譯」聽懂對方說話；點下方按鈕說中文翻給對方看，點句子旁的喇叭即可真人唸出。</p>
+        <button class="demo-btn" id="emptyDemoBtn" type="button">載入示範對話</button>
       </div>
     </main>
 
@@ -153,7 +121,7 @@
           <input
             type="text"
             id="quickChineseInput"
-            placeholder="或直接輸入中文，翻成英語給對方聽⋯"
+            placeholder="打字輸入中文，翻成英語⋯"
             autocomplete="off"
           />
           <button class="send-text-btn" id="quickSendBtn" type="button">翻譯</button>
@@ -167,7 +135,7 @@
             <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
             <line x1="12" y1="19" x2="12" y2="23"/>
           </svg>
-          <span id="speakBtnLabel">點擊說中文 → 翻成英語</span>
+          <span id="speakBtnLabel">說中文 → 翻成英語</span>
         </button>
         <button class="cancel-rec-btn" id="cancelRecBtn" type="button">取消</button>
       </div>
@@ -287,6 +255,11 @@
           <input type="checkbox" id="showOriginalCheck" checked />
         </label>
 
+        <div class="input-row">
+          <button class="btn-secondary" id="themeBtn" type="button" style="flex:1;">切換深淺主題</button>
+          <button class="btn-secondary" id="exportBtn" type="button" style="flex:1;">匯出對話紀錄</button>
+        </div>
+
         <button class="btn-primary" id="saveSettingsBtn" type="button">儲存設定</button>
       </div>
     </div>
@@ -304,13 +277,13 @@
       <div class="showcard-sub" id="showcardSub"></div>
     </div>
     <div class="showcard-footer">
-      <button class="btn-primary" id="speakShowcardBtn" type="button">AI 真人唸出來</button>
+      <button class="btn-primary" id="speakShowcardBtn" type="button">朗讀這一句</button>
     </div>
   </div>
 
   <!-- Toast -->
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="./app.js"></script>
+  <script type="module" src="./app.js?v=1.6"></script>
 </body>
 </html>

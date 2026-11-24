@@ -76,8 +76,6 @@ const els = {
   langBar: $('langBar'),
   listenSwitch: $('listenSwitch'),
   listenSub: $('listenSub'),
-  ttsSwitch: $('ttsSwitch'),
-  ttsSub: $('ttsSub'),
   listenStrip: $('listenStrip'),
   waveBars: $('waveBars'),
   vadStatus: $('vadStatus'),
@@ -200,16 +198,13 @@ function updateHeaderStatus() {
 }
 
 function updateSwitchUI() {
-  // Switch 1: Listen
+  // Single Listening Switch
   els.listenSwitch.classList.toggle('listen-on', isListening);
   els.listenSwitch.setAttribute('aria-checked', String(isListening));
-  els.listenSub.textContent = isListening ? '開啟中・外語→中／中文直出' : '開啟自動收音辨識';
+  els.listenSub.textContent = isListening
+    ? '聆聽中・聽到外語翻中文／中文直接印出'
+    : '外語自動翻中文・中文直接印出（標註 A / B）';
   els.listenStrip.classList.toggle('visible', isListening);
-
-  // Switch 2: Auto AI TTS
-  els.ttsSwitch.classList.toggle('tts-on', settings.autoTts);
-  els.ttsSwitch.setAttribute('aria-checked', String(settings.autoTts));
-  els.ttsSub.textContent = settings.autoTts ? '開啟中・譯文自動唸出' : '已關閉・點單句可播';
 
   // Target language pills & outbound button label
   const langInfo = TARGET_LANGUAGES[settings.targetLang] || TARGET_LANGUAGES.en;
@@ -217,10 +212,9 @@ function updateSwitchUI() {
     btn.classList.toggle('active', btn.dataset.lang === settings.targetLang);
   });
 
-  els.quickChineseInput.placeholder = `或輸入中文，翻成${langInfo.label}給對方聽⋯`;
+  els.quickChineseInput.placeholder = `打字輸入中文，翻成${langInfo.label}⋯`;
   if (!isManualRecording) {
-    const voiceHint = settings.autoTts ? '並唸出' : '';
-    els.speakBtnLabel.textContent = `點擊說中文 → 翻成${langInfo.label}${voiceHint}`;
+    els.speakBtnLabel.textContent = `說中文 → 翻成${langInfo.label}`;
   }
 
   // Setup banner
@@ -531,21 +525,6 @@ async function processVadQueue() {
       if (newlyAdded.length > 0) {
         saveState();
       }
-
-      // If Auto AI Read-Aloud switch is ON, speak newly translated non-Chinese utterances in Chinese
-      if (settings.autoTts && newlyAdded.length > 0) {
-        const translatedLines = newlyAdded.filter((m) => !m.isChinese);
-        if (translatedLines.length > 0) {
-          const lastMsg = translatedLines[translatedLines.length - 1];
-          const combined = translatedLines.map((m) => m.zh).join('。');
-          // Render first so user sees text immediately while audio loads
-          pendingCount = Math.max(0, pendingCount - 1);
-          renderFeed();
-          updateHeaderStatus();
-          await speakMessage(lastMsg, combined, 'zh');
-          continue;
-        }
-      }
     } catch (err) {
       console.error('VAD interpret error:', err);
       showToast(err.message, 3800);
@@ -668,16 +647,6 @@ async function runOutboundTranslation({ wav = null, textInput = null }) {
 
     messages.push(msg);
     saveState();
-
-    pendingCount = Math.max(0, pendingCount - 1);
-    renderFeed();
-    updateHeaderStatus();
-
-    // Speak translated foreign sentence aloud when AI Voice switch is ON
-    if (settings.autoTts) {
-      await speakMessage(msg, msg.translated, msg.targetLang);
-    }
-    return;
   } catch (err) {
     console.error('Outbound translate error:', err);
     showToast(err.message, 3800);
@@ -896,14 +865,6 @@ audio.onPlaybackChange = () => {
 
 // Event Wiring
 els.listenSwitch.addEventListener('click', toggleListening);
-
-els.ttsSwitch.addEventListener('click', async () => {
-  await audio.ensureContext().catch(() => {});
-  settings.autoTts = !settings.autoTts;
-  saveState();
-  updateSwitchUI();
-  showToast(settings.autoTts ? 'AI 真人唸出：已開啟' : 'AI 真人唸出：已關閉（點單句 🔊 仍可播報）');
-});
 
 els.langBar.addEventListener('click', (e) => {
   const pill = e.target.closest('.lang-pill');
