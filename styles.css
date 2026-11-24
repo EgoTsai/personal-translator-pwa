@@ -169,12 +169,36 @@ button {
   min-width: 0;
 }
 
+.brand-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .brand-title {
   margin: 0;
   font-size: 16px;
   font-weight: 700;
   letter-spacing: -0.01em;
   line-height: 1.2;
+}
+
+.version-badge {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: var(--bg-subtle);
+  color: var(--ink-muted);
+  border: 1px solid var(--border);
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.version-badge:hover, .version-badge:active {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 .status-line {

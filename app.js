@@ -1023,6 +1023,25 @@ els.speakShowcardBtn.addEventListener('click', () => {
   );
 });
 
+// Version badge: tap to force-check & reload latest PWA version (keeps localStorage API Key & history)
+const versionBadgeEl = $('versionBadge');
+if (versionBadgeEl) {
+  versionBadgeEl.addEventListener('click', async () => {
+    showToast('正在檢查並更新至最新版本⋯', 1800);
+    try {
+      if ('caches' in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+      if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((r) => r.update().catch(() => {})));
+      }
+    } catch (_) {}
+    window.location.reload();
+  });
+}
+
 // Service Worker registration for PWA
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
