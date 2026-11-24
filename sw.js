@@ -1,9 +1,9 @@
-const CACHE_NAME = 'personal-translator-v1.4';
+const CACHE_NAME = 'personal-translator-v1.5';
 const APP_SHELL = [
   './',
   './index.html',
-  './styles.css',
-  './app.js',
+  './styles.css?v=1.5',
+  './app.js?v=1.5',
   './audio.js',
   './gemini.js',
   './manifest.json',
