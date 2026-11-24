@@ -13,7 +13,7 @@ export const TARGET_LANGUAGES = {
     label: '英語',
     short: 'EN',
     nativeName: 'English',
-    flag: '🇬🇧',
+    flag: '🇺🇸',
     ttsHint: 'natural conversational English',
   },
   ja: {

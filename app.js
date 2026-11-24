@@ -262,25 +262,38 @@ function renderFeed() {
   });
 }
 
-function createMessageCard(msg) {
-  const card = document.createElement('article');
-  card.className = `utterance-card${msg.direction === 'outbound' ? ' outbound' : ''}`;
-  card.dataset.id = msg.id;
+const FLAG_SVG_MAP = {
+  en: `<svg class="flag-svg sm" viewBox="0 0 24 16" aria-hidden="true"><rect width="24" height="16" rx="2" fill="#B22234"/><path d="M0 2.5h24M0 5h24M0 7.5h24M0 10h24M0 12.5h24M0 15h24" stroke="#FFF" stroke-width="1.25"/><rect width="10.5" height="8.5" rx="1" fill="#3C3B6E"/><circle cx="2.3" cy="2.1" r=".6" fill="#FFF"/><circle cx="5.2" cy="2.1" r=".6" fill="#FFF"/><circle cx="8.1" cy="2.1" r=".6" fill="#FFF"/><circle cx="3.8" cy="4.2" r=".6" fill="#FFF"/><circle cx="6.7" cy="4.2" r=".6" fill="#FFF"/><circle cx="2.3" cy="6.3" r=".6" fill="#FFF"/><circle cx="5.2" cy="6.3" r=".6" fill="#FFF"/><circle cx="8.1" cy="6.3" r=".6" fill="#FFF"/></svg>`,
+  ja: `<svg class="flag-svg sm" viewBox="0 0 24 16" aria-hidden="true"><rect width="24" height="16" rx="2" fill="#FFFFFF"/><circle cx="12" cy="8" r="4.6" fill="#BC002D"/></svg>`,
+  sv: `<svg class="flag-svg sm" viewBox="0 0 24 16" aria-hidden="true"><rect width="24" height="16" rx="2" fill="#006AA7"/><rect x="7" width="3.2" height="16" fill="#FECC00"/><rect y="6.4" width="24" height="3.2" fill="#FECC00"/></svg>`,
+};
 
+const SPEAKER_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path class="sp-wave-1" d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path class="sp-wave-2" d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
+
+let loadingSpeakId = null;
+
+function syncPlaybackButtons() {
+  const activeId = audio.playingId;
+  els.transcriptFeed.querySelectorAll('.inline-speak-btn').forEach((btn) => {
+    const cid = btn.dataset.cacheId;
+    const isPlaying = Boolean(activeId && cid === activeId);
+    const isLoading = Boolean(!isPlaying && loadingSpeakId && cid === loadingSpeakId);
+    btn.classList.toggle('playing', isPlaying);
+    btn.classList.toggle('loading', isLoading);
+    btn.title = isPlaying ? '播放中（點擊停止）' : isLoading ? '生成語音中⋯' : '朗讀這一句';
+    btn.setAttribute('aria-label', btn.title);
+  });
+}
+
+function createMessageCard(msg) {
   const isOutbound = msg.direction === 'outbound';
   const spName = displaySpeakerName(msg.speaker, isOutbound);
   const spClass = speakerColorClass(msg.speaker, isOutbound);
 
-  let langPillText = '中文';
-  if (isOutbound) {
-    const targetInfo = TARGET_LANGUAGES[msg.targetLang] || TARGET_LANGUAGES.en;
-    langPillText = `中 → ${targetInfo.flag} ${targetInfo.label}`;
-  } else if (!msg.isChinese) {
-    const shortLang = LANG_BADGE_MAP[msg.lang] || msg.lang.toUpperCase();
-    langPillText = `${shortLang} → 中文`;
-  }
-
-  const isPlaying = audio.playingId === msg.id;
+  const card = document.createElement('article');
+  const cardColorClass = isOutbound ? 'outbound' : `card-${spClass}`;
+  card.className = `utterance-card ${cardColorClass}`;
+  card.dataset.id = msg.id;
 
   // Determine main text & speakable payload
   const mainText = isOutbound ? msg.translated : msg.zh;
@@ -304,7 +317,17 @@ function createMessageCard(msg) {
 
   const langTag = document.createElement('span');
   langTag.className = 'lang-tag';
-  langTag.textContent = langPillText;
+  if (isOutbound) {
+    const targetInfo = TARGET_LANGUAGES[msg.targetLang] || TARGET_LANGUAGES.en;
+    const flagHtml = FLAG_SVG_MAP[targetInfo.code] || '';
+    langTag.innerHTML = `中 → ${flagHtml}<span>${targetInfo.label}</span>`;
+  } else if (!msg.isChinese) {
+    const shortLang = LANG_BADGE_MAP[msg.lang] || msg.lang.toUpperCase();
+    const flagHtml = FLAG_SVG_MAP[msg.lang] || '';
+    langTag.innerHTML = `${flagHtml}<span>${shortLang} → 中文</span>`;
+  } else {
+    langTag.textContent = '中文';
+  }
 
   const timeTag = document.createElement('span');
   timeTag.className = 'time-tag';
@@ -346,14 +369,14 @@ function createMessageCard(msg) {
 
   const makeInlineSpeakBtn = (cacheId, textToSpeak, langCode, subtle = false) => {
     const playing = audio.playingId === cacheId;
+    const loading = !playing && loadingSpeakId === cacheId;
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = `inline-speak-btn${subtle ? ' subtle' : ''}${playing ? ' playing' : ''}`;
-    btn.title = playing ? '停止播放' : '朗讀這一句';
+    btn.dataset.cacheId = cacheId;
+    btn.className = `inline-speak-btn${subtle ? ' subtle' : ''}${playing ? ' playing' : ''}${loading ? ' loading' : ''}`;
+    btn.title = playing ? '播放中（點擊停止）' : '朗讀這一句';
     btn.setAttribute('aria-label', btn.title);
-    btn.innerHTML = playing
-      ? `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>`
-      : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
+    btn.innerHTML = SPEAKER_ICON_SVG;
     btn.addEventListener('click', () => {
       if (audio.playingId === cacheId) {
         audio.stopPlayback();
@@ -411,7 +434,7 @@ function renameSpeaker(speakerCode) {
   renderFeed();
 }
 
-// TTS Playback
+// TTS Playback (updates only the active speaker button in-place — zero flicker)
 async function speakMessage(msgOrId, text, langCode) {
   const cacheId = typeof msgOrId === 'string' ? msgOrId : msgOrId?.id;
   if (!text) return;
@@ -424,8 +447,9 @@ async function speakMessage(msgOrId, text, langCode) {
 
     const useGeminiTts = settings.ttsModel !== 'browser' && Boolean(settings.apiKey);
     if (useGeminiTts) {
+      loadingSpeakId = cacheId;
+      syncPlaybackButtons();
       updateHeaderStatus();
-      showToast('AI 語音生成中⋯', 1400);
       const { base64, mimeType } = await synthesizeGeminiSpeech({
         apiKey: settings.apiKey,
         ttsModel: settings.ttsModel,
@@ -433,6 +457,7 @@ async function speakMessage(msgOrId, text, langCode) {
         text,
         langCode,
       });
+      loadingSpeakId = null;
       await audio.playGeminiAudio(cacheId, base64, mimeType);
     } else {
       if (settings.ttsModel !== 'browser' && !settings.apiKey) {
@@ -441,6 +466,8 @@ async function speakMessage(msgOrId, text, langCode) {
       await audio.speakBrowserFallback(cacheId, text, langCode);
     }
   } catch (err) {
+    loadingSpeakId = null;
+    syncPlaybackButtons();
     console.error('TTS error:', err);
     showToast(`AI 語音失敗，改用瀏覽器語音：${err.message}`, 3200);
     await audio.speakBrowserFallback(cacheId, text, langCode);
@@ -860,7 +887,7 @@ audio.onVadSegment = (wav) => {
 };
 
 audio.onPlaybackChange = () => {
-  renderFeed();
+  syncPlaybackButtons();
   updateHeaderStatus();
 };
 

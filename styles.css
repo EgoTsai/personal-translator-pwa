@@ -23,11 +23,11 @@
   --warn-ink: #8C5808;
   --warn-border: rgba(140, 88, 8, 0.22);
 
-  /* Speaker palette */
-  --sp-a-bg: #E2F1F0; --sp-a-ink: #0D5454;
-  --sp-b-bg: #FBEBD9; --sp-b-ink: #9A4D10;
-  --sp-c-bg: #E6ECF8; --sp-c-ink: #27488A;
-  --sp-d-bg: #E6F2E8; --sp-d-ink: #255E34;
+  /* Soft per-speaker dialogue palette (A: green, B: yellow, C: blue, D: rose) */
+  --sp-a-card: #EFF8F3; --sp-a-border: rgba(24, 128, 86, 0.18); --sp-a-bg: #D6EFE1; --sp-a-ink: #145C3E; --sp-a-text: #154A34;
+  --sp-b-card: #FCF7E8; --sp-b-border: rgba(168, 120, 22, 0.20); --sp-b-bg: #F6E6BC; --sp-b-ink: #7A520B; --sp-b-text: #543A0A;
+  --sp-c-card: #EFF5FC; --sp-c-border: rgba(45, 96, 178, 0.18); --sp-c-bg: #DCE9FA; --sp-c-ink: #224A8C; --sp-c-text: #1B3868;
+  --sp-d-card: #FAF1F5; --sp-d-border: rgba(156, 66, 102, 0.18); --sp-d-bg: #F2DCE6; --sp-d-ink: #7A2B4C; --sp-d-text: #592038;
   --sp-me-bg: #1F2428; --sp-me-ink: #F6F5F0;
 
   --radius-sm: 10px;
@@ -67,10 +67,10 @@
   --warn-ink: #E5B663;
   --warn-border: rgba(229, 182, 99, 0.25);
 
-  --sp-a-bg: #163232; --sp-a-ink: #6CD0C8;
-  --sp-b-bg: #362516; --sp-b-ink: #F2AE6B;
-  --sp-c-bg: #1D2840; --sp-c-ink: #8FB4F8;
-  --sp-d-bg: #1A3021; --sp-d-ink: #7FD196;
+  --sp-a-card: #13231D; --sp-a-border: rgba(116, 214, 166, 0.22); --sp-a-bg: #1B3B2E; --sp-a-ink: #7FE0B0; --sp-a-text: #CBEFD9;
+  --sp-b-card: #242013; --sp-b-border: rgba(240, 200, 108, 0.24); --sp-b-bg: #3A3118; --sp-b-ink: #F3D078; --sp-b-text: #F5E6BC;
+  --sp-c-card: #141E2B; --sp-c-border: rgba(132, 182, 246, 0.22); --sp-c-bg: #1C2D45; --sp-c-ink: #8EC0FA; --sp-c-text: #CEE3FA;
+  --sp-d-card: #241820; --sp-d-border: rgba(232, 156, 186, 0.22); --sp-d-bg: #3A2231; --sp-d-ink: #F0A8C5; --sp-d-text: #F2D2DF;
   --sp-me-bg: #ECEAE4; --sp-me-ink: #121619;
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24);
@@ -606,7 +606,6 @@ button {
   border-radius: var(--radius-md);
   padding: 12px 14px;
   box-shadow: var(--shadow-sm);
-  animation: fadeSlideUp 0.22s ease;
 }
 
 .utterance-card.outbound {
@@ -614,9 +613,45 @@ button {
   border-color: rgba(14, 90, 90, 0.20);
 }
 
-@keyframes fadeSlideUp {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
+.utterance-card.card-sp-a {
+  background: var(--sp-a-card);
+  border-color: var(--sp-a-border);
+}
+.utterance-card.card-sp-a .utterance-main { color: var(--sp-a-text); }
+
+.utterance-card.card-sp-b {
+  background: var(--sp-b-card);
+  border-color: var(--sp-b-border);
+}
+.utterance-card.card-sp-b .utterance-main { color: var(--sp-b-text); }
+
+.utterance-card.card-sp-c {
+  background: var(--sp-c-card);
+  border-color: var(--sp-c-border);
+}
+.utterance-card.card-sp-c .utterance-main { color: var(--sp-c-text); }
+
+.utterance-card.card-sp-d {
+  background: var(--sp-d-card);
+  border-color: var(--sp-d-border);
+}
+.utterance-card.card-sp-d .utterance-main { color: var(--sp-d-text); }
+
+.flag-svg {
+  width: 20px;
+  height: 14px;
+  border-radius: 2.5px;
+  flex-shrink: 0;
+  display: inline-block;
+  vertical-align: middle;
+  box-shadow: 0 0 0 1px rgba(128, 128, 128, 0.22);
+}
+
+.flag-svg.sm {
+  width: 15px;
+  height: 10.5px;
+  border-radius: 2px;
+  margin: 0 2px;
 }
 
 .utterance-top {
@@ -654,6 +689,9 @@ button {
 .speaker-badge.sp-me { background: var(--sp-me-bg); color: var(--sp-me-ink); }
 
 .lang-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   font-size: 11px;
   font-weight: 600;
   padding: 2px 7px;
@@ -689,11 +727,6 @@ button {
   color: var(--ink);
 }
 
-.mini-btn.playing {
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-
 .mini-btn svg {
   width: 16px;
   height: 16px;
@@ -719,23 +752,53 @@ button {
   border-radius: 999px;
   background: var(--accent-soft);
   color: var(--accent);
-  transition: background 0.15s ease, transform 0.1s ease, color 0.15s ease;
+  transition: background 0.18s ease, color 0.18s ease, transform 0.12s ease;
 }
 
-.inline-speak-btn:hover, .inline-speak-btn:active {
+.inline-speak-btn:hover {
   background: var(--accent);
   color: var(--accent-ink);
-  transform: scale(0.95);
 }
 
-.inline-speak-btn.playing {
+.inline-speak-btn:active {
+  transform: scale(0.94);
+}
+
+.inline-speak-btn.playing,
+.inline-speak-btn.loading {
   background: var(--accent);
   color: var(--accent-ink);
 }
 
 .inline-speak-btn svg {
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
+  overflow: visible;
+}
+
+/* Smooth Speaker Sound-Wave Emission Animation */
+.inline-speak-btn .sp-wave-1,
+.inline-speak-btn .sp-wave-2 {
+  transform-box: fill-box;
+  transform-origin: left center;
+}
+
+.inline-speak-btn.playing .sp-wave-1 {
+  animation: speakerWave 1.05s ease-in-out infinite;
+}
+
+.inline-speak-btn.playing .sp-wave-2 {
+  animation: speakerWave 1.05s ease-in-out 0.26s infinite;
+}
+
+.inline-speak-btn.loading .sp-wave-1,
+.inline-speak-btn.loading .sp-wave-2 {
+  animation: speakerWave 1.3s ease-in-out infinite;
+}
+
+@keyframes speakerWave {
+  0%, 100% { opacity: 0.22; transform: scale(0.88); }
+  45% { opacity: 1; transform: scale(1.12); }
 }
 
 .inline-speak-btn.subtle {
@@ -747,9 +810,10 @@ button {
 }
 
 .inline-speak-btn.subtle:hover,
-.inline-speak-btn.subtle.playing {
-  background: var(--accent-soft);
-  color: var(--accent);
+.inline-speak-btn.subtle.playing,
+.inline-speak-btn.subtle.loading {
+  background: var(--accent);
+  color: var(--accent-ink);
 }
 
 .inline-speak-btn.subtle svg {
