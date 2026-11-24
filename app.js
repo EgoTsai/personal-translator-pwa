@@ -2,7 +2,7 @@
  * app.js — Main UI controller for 隨身口譯官 PWA
  */
 
-import { AudioEngine } from './audio.js?v=2.4';
+import { AudioEngine } from './audio.js?v=2.5';
 import {
   TARGET_LANGUAGES,
   ICEBREAKER_BANNERS,
@@ -11,8 +11,8 @@ import {
   translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
-} from './gemini.js?v=2.4';
-import { GeminiLiveClient } from './live.js?v=2.4';
+} from './gemini.js?v=2.5';
+import { GeminiLiveClient } from './live.js?v=2.5';
 
 const STORAGE_KEYS = {
   settings: 'pt_settings_v1',
@@ -21,6 +21,7 @@ const STORAGE_KEYS = {
 };
 
 const DEFAULT_SETTINGS = {
+  settingsVersion: 2,
   apiKey: '',
   model: 'gemini-3.5-flash-lite',
   liveModel: 'gemini-3.8-live',
@@ -55,9 +56,18 @@ const TONE_META = {
 };
 const TONE_ORDER = ['natural', 'polite', 'casual'];
 
-// State
-let settings = loadJson(STORAGE_KEYS.settings, DEFAULT_SETTINGS);
-settings = { ...DEFAULT_SETTINGS, ...settings };
+// State + one-time migration so v2.1 users upgrading get Plan A's faster 850ms silence default
+const storedSettings = loadJson(STORAGE_KEYS.settings, null);
+let settings = { ...DEFAULT_SETTINGS, ...(storedSettings || {}) };
+if (storedSettings && !storedSettings.settingsVersion) {
+  if (Number(storedSettings.silenceMs) === 1300) {
+    settings.silenceMs = 850;
+  }
+  settings.settingsVersion = 2;
+  try {
+    localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(settings));
+  } catch (_) {}
+}
 
 let messages = loadJson(STORAGE_KEYS.messages, []);
 let speakerMemory = loadJson(STORAGE_KEYS.speakers, {}); // { A: { voiceHint, customName } }
@@ -70,9 +80,15 @@ let liveStartTs = 0;
 let liveTimerHandle = null;
 let liveIdleHandle = null;
 let liveInboundCount = 0;
+let sessionEpoch = 0; // Monotonic guard against rapid toggle race conditions
 let isManualRecording = false;
 let manualTimerHandle = null;
 let manualStartTime = 0;
+let isOnline = typeof navigator !== 'undefined' && 'onLine' in navigator ? navigator.onLine : true;
+
+// TTS concurrency guard (prevents rapid 🔊 clicks from playing out of order)
+let speakRequestSeq = 0;
+let activeSpeakAbort = null;
 
 // Sequential queue for Plan A VAD segments so speaker continuity stays ordered
 const vadQueue = [];
@@ -208,24 +224,38 @@ function loadJson(key, fallback) {
 }
 
 function saveState() {
+  // Always persist settings (API Key!) first in an isolated try/catch so storage quota on photos never loses settings
   try {
     localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(settings));
-    // Keep at most 120 messages and strip thumbnails from older photo cards to stay safely under storage quota
-    const recent = messages.slice(-120);
-    let keptThumbs = 0;
-    const pruned = [];
-    for (let i = recent.length - 1; i >= 0; i--) {
-      const m = recent[i];
-      if (m.type === 'photo' && m.thumbUrl) {
-        keptThumbs += 1;
-        pruned.unshift(keptThumbs <= 6 ? m : { ...m, thumbUrl: '' });
-      } else {
-        pruned.unshift(m);
-      }
-    }
-    localStorage.setItem(STORAGE_KEYS.messages, JSON.stringify(pruned));
     localStorage.setItem(STORAGE_KEYS.speakers, JSON.stringify(speakerMemory));
   } catch (_) {}
+
+  // Keep at most 120 messages and strip thumbnails from older photo cards to stay safely under storage quota
+  const recent = messages.slice(-120);
+  const buildPruned = (maxThumbs, limit) => {
+    const slice = recent.slice(-limit);
+    let keptThumbs = 0;
+    const out = [];
+    for (let i = slice.length - 1; i >= 0; i--) {
+      const m = slice[i];
+      if (m.type === 'photo' && m.thumbUrl) {
+        keptThumbs += 1;
+        out.unshift(keptThumbs <= maxThumbs ? m : { ...m, thumbUrl: '' });
+      } else {
+        out.unshift(m);
+      }
+    }
+    return out;
+  };
+
+  try {
+    localStorage.setItem(STORAGE_KEYS.messages, JSON.stringify(buildPruned(6, 120)));
+  } catch (_) {
+    try {
+      // Fallback: strip all photo thumbnails and keep latest 60 text items
+      localStorage.setItem(STORAGE_KEYS.messages, JSON.stringify(buildPruned(0, 60)));
+    } catch (_) {}
+  }
 }
 
 let toastTimer = null;
@@ -263,6 +293,11 @@ function applyTheme() {
 
 function updateHeaderStatus() {
   els.statusDot.className = 'status-dot';
+  if (!isOnline) {
+    els.statusDot.classList.add('offline');
+    els.statusText.textContent = '離線中・等待網路恢復';
+    return;
+  }
   if (audio.playingId) {
     els.statusDot.classList.add('speaking');
     els.statusText.textContent = 'AI 真人朗讀中⋯';
@@ -374,6 +409,24 @@ function displaySpeakerName(speakerCode, isOutbound) {
   return speakerCode;
 }
 
+// Smart stick-to-bottom scrolling: never yanks the screen down if the user scrolled up to read history
+function isNearFeedBottom() {
+  const feed = els.transcriptFeed;
+  if (!feed || typeof feed.scrollHeight !== 'number' || typeof feed.clientHeight !== 'number') return true;
+  return feed.scrollHeight - feed.scrollTop - feed.clientHeight < 140;
+}
+
+let scrollRafPending = false;
+function scrollFeedToBottom(force = false) {
+  if (!force && !isNearFeedBottom()) return;
+  if (scrollRafPending) return;
+  scrollRafPending = true;
+  requestAnimationFrame(() => {
+    scrollRafPending = false;
+    els.transcriptFeed.scrollTop = els.transcriptFeed.scrollHeight;
+  });
+}
+
 function buildDraftCaptionElement(text) {
   const el = document.createElement('div');
   el.id = 'liveDraftCard';
@@ -395,9 +448,13 @@ function upsertDraftCaptionDom(text) {
 
   if (!currentDraftText) {
     if (existing) existing.remove();
+    if (messages.length === 0 && !activeStreamState && pendingCount === 0 && els.emptyState && els.emptyState.parentNode !== feed) {
+      feed.appendChild(els.emptyState);
+    }
     return;
   }
 
+  const shouldScroll = isNearFeedBottom();
   if (els.emptyState && els.emptyState.parentNode === feed) {
     els.emptyState.remove();
   }
@@ -406,9 +463,15 @@ function upsertDraftCaptionDom(text) {
     const span = existing.querySelector('.draft-caption-text');
     if (span) span.textContent = currentDraftText;
   } else {
-    feed.appendChild(buildDraftCaptionElement(currentDraftText));
+    const anchor = document.getElementById('liveStreamingCard') || document.getElementById('pendingPill');
+    const node = buildDraftCaptionElement(currentDraftText);
+    if (anchor && anchor.parentNode === feed) {
+      feed.insertBefore(node, anchor);
+    } else {
+      feed.appendChild(node);
+    }
   }
-  feed.scrollTop = feed.scrollHeight;
+  if (shouldScroll) scrollFeedToBottom(true);
 }
 
 function buildStreamingCardElement(data) {
@@ -416,6 +479,7 @@ function buildStreamingCardElement(data) {
   const spClass = data.isLive ? 'sp-c' : speakerColorClass(data.speaker || 'A', isOut);
   const card = document.createElement('article');
   card.id = 'liveStreamingCard';
+  card.dataset.streamKey = `${data.isLive ? 'L' : 'S'}_${isOut ? 'out' : 'in'}_${data.speaker || 'A'}`;
   card.className = `utterance-card streaming ${isOut ? 'outbound' : `card-${spClass}`}${data.isLive ? ' live-stream-card' : ''}`;
 
   const top = document.createElement('div');
@@ -445,19 +509,17 @@ function buildStreamingCardElement(data) {
   mainEl.append(textNode, cursor);
   card.appendChild(mainEl);
 
-  if (data.reading) {
-    const readEl = document.createElement('div');
-    readEl.className = 'utterance-reading';
-    readEl.textContent = data.reading;
-    card.appendChild(readEl);
-  }
+  const readEl = document.createElement('div');
+  readEl.className = 'utterance-reading';
+  readEl.textContent = data.reading || '';
+  readEl.style.display = data.reading ? '' : 'none';
+  card.appendChild(readEl);
 
-  if (data.subText) {
-    const subEl = document.createElement('div');
-    subEl.className = 'utterance-sub';
-    subEl.textContent = data.subText;
-    card.appendChild(subEl);
-  }
+  const subEl = document.createElement('div');
+  subEl.className = 'utterance-sub';
+  subEl.textContent = data.subText || '';
+  subEl.style.display = data.subText ? '' : 'none';
+  card.appendChild(subEl);
 
   return card;
 }
@@ -470,22 +532,45 @@ function upsertStreamingCardDom(data) {
     return;
   }
 
+  const shouldScroll = isNearFeedBottom();
   if (els.emptyState && els.emptyState.parentNode === feed) {
     els.emptyState.remove();
   }
 
   // Hide generic spinner pill once actual streaming tokens are visible
-  const pendingPill = feed.querySelector('.pending-pill');
+  const pendingPill = document.getElementById('pendingPill');
   if (pendingPill) pendingPill.remove();
 
+  const isOut = data.direction === 'outbound';
+  const nextKey = `${data.isLive ? 'L' : 'S'}_${isOut ? 'out' : 'in'}_${data.speaker || 'A'}`;
   const existing = document.getElementById('liveStreamingCard');
-  const nextCard = buildStreamingCardElement(data);
-  if (existing) {
-    existing.replaceWith(nextCard);
+
+  // Update text nodes IN-PLACE when card identity matches (zero DOM churn, smooth cursor!)
+  if (existing && existing.dataset.streamKey === nextKey) {
+    const mainTextEl = existing.querySelector('.stream-main-text');
+    if (mainTextEl) mainTextEl.textContent = data.mainText || '';
+
+    const readEl = existing.querySelector('.utterance-reading');
+    if (readEl) {
+      readEl.textContent = data.reading || '';
+      readEl.style.display = data.reading ? '' : 'none';
+    }
+
+    const subEl = existing.querySelector('.utterance-sub');
+    if (subEl) {
+      subEl.textContent = data.subText || '';
+      subEl.style.display = data.subText ? '' : 'none';
+    }
   } else {
-    feed.appendChild(nextCard);
+    const nextCard = buildStreamingCardElement(data);
+    if (existing) {
+      existing.replaceWith(nextCard);
+    } else {
+      feed.appendChild(nextCard);
+    }
   }
-  feed.scrollTop = feed.scrollHeight;
+
+  if (shouldScroll) scrollFeedToBottom(true);
 }
 
 function clearStreamingCardDom() {
@@ -494,16 +579,71 @@ function clearStreamingCardDom() {
   if (existing) existing.remove();
 }
 
-function renderFeed() {
+function syncPendingPillDom() {
+  const feed = els.transcriptFeed;
+  const existing = document.getElementById('pendingPill');
+  const shouldShow = pendingCount > 0 && !(activeStreamState && (activeStreamState.mainText || activeStreamState.subText));
+
+  if (shouldShow) {
+    const shouldScroll = isNearFeedBottom();
+    if (!existing) {
+      const pill = document.createElement('div');
+      pill.id = 'pendingPill';
+      pill.className = 'pending-pill';
+      pill.innerHTML = `<span class="spinner"></span><span>Gemini 極速翻譯中⋯</span>`;
+      feed.appendChild(pill);
+    }
+    if (shouldScroll) scrollFeedToBottom(true);
+  } else if (existing) {
+    existing.remove();
+  }
+}
+
+/**
+ * Incrementally append a single finalized message card without rebuilding the entire feed DOM.
+ */
+function appendMessageCard(msg, forceScroll = false) {
+  const feed = els.transcriptFeed;
+  const shouldScroll = forceScroll || isNearFeedBottom();
+
+  if (els.emptyState && els.emptyState.parentNode === feed) {
+    els.emptyState.remove();
+  }
+
+  const card = createMessageCard(msg);
+  const anchor =
+    document.getElementById('liveDraftCard') ||
+    document.getElementById('liveStreamingCard') ||
+    document.getElementById('pendingPill');
+
+  if (anchor && anchor.parentNode === feed) {
+    feed.insertBefore(card, anchor);
+  } else {
+    feed.appendChild(card);
+  }
+
+  // Keep DOM node count bounded in long conversations
+  while (messages.length > 150) {
+    messages.shift();
+    const firstCard = feed.querySelector('.utterance-card:not(.streaming)');
+    if (firstCard) firstCard.remove();
+  }
+
+  if (shouldScroll) scrollFeedToBottom(true);
+}
+
+function renderFeed(forceScroll = true) {
   const feed = els.transcriptFeed;
   feed.innerHTML = '';
 
   if (messages.length === 0 && !activeStreamState && !currentDraftText) {
     feed.appendChild(els.emptyState);
   } else {
+    const frag = document.createDocumentFragment();
     for (const msg of messages) {
-      feed.appendChild(createMessageCard(msg));
+      frag.appendChild(createMessageCard(msg));
     }
+    feed.appendChild(frag);
   }
 
   if (currentDraftText) {
@@ -514,14 +654,13 @@ function renderFeed() {
     feed.appendChild(buildStreamingCardElement(activeStreamState));
   } else if (pendingCount > 0) {
     const pill = document.createElement('div');
+    pill.id = 'pendingPill';
     pill.className = 'pending-pill';
     pill.innerHTML = `<span class="spinner"></span><span>Gemini 極速翻譯中⋯</span>`;
     feed.appendChild(pill);
   }
 
-  requestAnimationFrame(() => {
-    feed.scrollTop = feed.scrollHeight;
-  });
+  scrollFeedToBottom(forceScroll);
 }
 
 const FLAG_SVG_MAP = {
@@ -571,8 +710,8 @@ function createMessageCard(msg) {
     btn.innerHTML = SPEAKER_ICON_SVG;
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (audio.playingId === cacheId) {
-        audio.stopPlayback();
+      if (audio.playingId === cacheId || loadingSpeakId === cacheId) {
+        cancelActiveSpeak();
       } else {
         speakMessage(cacheId, textToSpeak, langCode);
       }
@@ -824,42 +963,83 @@ function renameSpeaker(speakerCode) {
   renderFeed();
 }
 
-// TTS Playback (updates only the active speaker button in-place — zero flicker)
+function cancelActiveSpeak() {
+  speakRequestSeq += 1;
+  if (activeSpeakAbort) {
+    try { activeSpeakAbort.abort(); } catch (_) {}
+    activeSpeakAbort = null;
+  }
+  loadingSpeakId = null;
+  audio.stopPlayback();
+  syncPlaybackButtons();
+  updateHeaderStatus();
+}
+
+// TTS Playback (race-safe, zero-flicker in-place button state, iOS Safari unlocked)
 async function speakMessage(msgOrId, text, langCode) {
   const cacheId = typeof msgOrId === 'string' ? msgOrId : msgOrId?.id;
   if (!text) return;
+
   // Unlock dedicated speaker playback synchronously inside the user tap gesture
   audio.unlockPlayback();
+
+  const reqSeq = ++speakRequestSeq;
+  if (activeSpeakAbort) {
+    try { activeSpeakAbort.abort(); } catch (_) {}
+    activeSpeakAbort = null;
+  }
+
   try {
     if (audio.hasCachedAudio(cacheId)) {
+      loadingSpeakId = null;
+      syncPlaybackButtons();
       await audio.playCachedAudio(cacheId);
       return;
     }
 
     const useGeminiTts = settings.ttsModel !== 'browser' && Boolean(settings.apiKey);
     if (useGeminiTts) {
+      const abortCtrl = new AbortController();
+      activeSpeakAbort = abortCtrl;
       loadingSpeakId = cacheId;
       syncPlaybackButtons();
       updateHeaderStatus();
+
       const { base64, mimeType } = await synthesizeGeminiSpeech({
         apiKey: settings.apiKey,
         ttsModel: settings.ttsModel,
         voiceName: settings.voiceName,
         text,
         langCode,
+        signal: abortCtrl.signal,
       });
+
+      if (activeSpeakAbort === abortCtrl) activeSpeakAbort = null;
+
+      // If another speaker click superseded this request, still cache the fetched audio silently!
+      if (reqSeq !== speakRequestSeq) {
+        if (cacheId) audio.cacheGeminiAudio(cacheId, base64, mimeType);
+        return;
+      }
+
       loadingSpeakId = null;
       syncPlaybackButtons();
       await audio.playGeminiAudio(cacheId, base64, mimeType);
     } else {
+      loadingSpeakId = null;
+      syncPlaybackButtons();
       if (settings.ttsModel !== 'browser' && !settings.apiKey) {
         showToast('未設定 API Key，暫用手機內建語音示範');
       }
       await audio.speakBrowserFallback(cacheId, text, langCode);
     }
   } catch (err) {
+    if (err?.name === 'AbortError' || reqSeq !== speakRequestSeq) {
+      return;
+    }
     loadingSpeakId = null;
     syncPlaybackButtons();
+    updateHeaderStatus();
     console.error('TTS error:', err);
     showToast(`AI 語音失敗，改用瀏覽器語音：${err.message}`, 3200);
     await audio.speakBrowserFallback(cacheId, text, langCode);
@@ -943,11 +1123,16 @@ function stopDraftRecognition(clearText = true) {
   }
 }
 
-// Language heuristic helpers for Gemini Live turns
-function isLikelyChineseText(text) {
+// Language heuristic helpers for Gemini Live turns (ratio-based so English with a quoted Han place name stays English)
+export function isLikelyChineseText(text) {
   if (!text) return false;
-  if (/[\u3040-\u30ff]/.test(text)) return false; // Japanese Kana -> not Chinese
-  return /[\u4e00-\u9fff]/.test(text);
+  const kanaCount = (text.match(/[\u3040-\u30ff]/g) || []).length;
+  if (kanaCount > 0) return false; // Japanese Kana -> Japanese, not Chinese
+  const hanCount = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+  if (hanCount === 0) return false;
+  const latinCount = (text.match(/[A-Za-zÅÄÖåäöÉé]/g) || []).length;
+  // Each Han char carries ~2-3x Latin char information density
+  return hanCount * 2 >= latinCount;
 }
 
 function detectRoughForeignLang(text, fallback = 'en') {
@@ -992,6 +1177,7 @@ function startLiveTimers() {
   liveIdleHandle = setInterval(() => {
     if (!liveConnected || !liveClient.lastActivityTs) return;
     if (Date.now() - liveClient.lastActivityTs >= 5 * 60 * 1000) {
+      sessionEpoch += 1;
       stopLiveSession(true);
       isListening = false;
       syncWakeLock();
@@ -1104,18 +1290,19 @@ liveClient.onTurnComplete = async ({ inputText, outputText, pcmChunks, sampleRat
 
   messages.push(msg);
   saveState();
-  renderFeed();
+  appendMessageCard(msg);
   updateHeaderStatus();
 };
 
 liveClient.onGoAway = () => {
   if (isListening && isLiveMode) {
-    showToast('Live 連線即將到期，自動重新連線中⋯', 2500);
-    startLiveSession().catch(() => {});
+    showToast('Live 連線即將到期，無縫續連中⋯', 2400);
+    const epoch = ++sessionEpoch;
+    startLiveSession({ resume: true, epoch }).catch(() => {});
   }
 };
 
-async function startLiveSession() {
+async function startLiveSession({ resume = false, epoch = sessionEpoch } = {}) {
   stopDraftRecognition(true);
   audio.stopListening();
   liveConnecting = true;
@@ -1123,21 +1310,29 @@ async function startLiveSession() {
 
   try {
     await audio.ensureMicrophone();
+    if (epoch !== sessionEpoch) return;
     await liveClient.connect({
       apiKey: settings.apiKey,
       model: settings.liveModel || 'gemini-3.8-live',
       targetLang: settings.targetLang,
       tone: settings.tone,
       voiceName: settings.voiceName,
+      resume,
     });
+    if (epoch !== sessionEpoch) {
+      liveClient.disconnect(true);
+      return;
+    }
     await audio.startLiveStream((pcm16) => {
       liveClient.sendAudioPcm16k(pcm16);
     });
   } catch (err) {
-    liveConnecting = false;
-    liveConnected = false;
-    audio.stopLiveStream();
-    liveClient.disconnect();
+    if (epoch === sessionEpoch) {
+      liveConnecting = false;
+      liveConnected = false;
+      audio.stopLiveStream();
+      liveClient.disconnect(true);
+    }
     throw err;
   }
 }
@@ -1147,7 +1342,7 @@ function stopLiveSession(releaseMic = true) {
   liveConnecting = false;
   liveConnected = false;
   clearStreamingCardDom();
-  liveClient.disconnect();
+  liveClient.disconnect(true);
   if (releaseMic) {
     audio.stopLiveStream();
   } else {
@@ -1159,10 +1354,17 @@ function stopLiveSession(releaseMic = true) {
 
 // Live Mode Switch (Default OFF = Plan A; ON = Gemini Live WebSocket)
 async function toggleLiveMode() {
+  audio.unlockPlayback();
+  const epoch = ++sessionEpoch;
+
   if (!isLiveMode) {
     if (!settings.apiKey) {
       showToast('請先填入 Gemini API Key 才能使用 Live 串流模式');
       openSettings();
+      return;
+    }
+    if (!isOnline) {
+      showToast('目前處於離線狀態，無法開啟 Live 串流');
       return;
     }
     isLiveMode = true;
@@ -1173,9 +1375,11 @@ async function toggleLiveMode() {
     updateSwitchUI();
     showToast('⚡ 正在連線 Gemini Live 超低延遲串流⋯', 2200);
     try {
-      await startLiveSession();
+      await startLiveSession({ resume: false, epoch });
+      if (epoch !== sessionEpoch) return;
       showToast('⚡ Live 雙向串流已就緒（點 🔊 可 0 秒重播）');
     } catch (err) {
+      if (epoch !== sessionEpoch) return;
       console.error('Live start error:', err);
       isLiveMode = false;
       isListening = false;
@@ -1194,10 +1398,12 @@ async function toggleLiveMode() {
           silenceMs: Number(settings.silenceMs),
         });
         await audio.startListening();
+        if (epoch !== sessionEpoch) return;
         startDraftRecognition(settings.targetLang);
-        els.vadStatus.textContent = '極速聆聽中⋯停頓 0.85 秒自動串流翻譯';
+        els.vadStatus.textContent = '極速聆聽中⋯停頓即串流翻譯';
         showToast('已切回標準串流（方案 A・省額度）');
       } catch (err) {
+        if (epoch !== sessionEpoch) return;
         isListening = false;
         audio.stopListening();
         showToast(`切回失敗：${err.message}`, 3500);
@@ -1213,10 +1419,17 @@ async function toggleLiveMode() {
 
 // Listening Switch (with Screen Wake Lock + haptic — uses Plan A by default, or Live when toggled ON)
 async function toggleListening() {
+  audio.unlockPlayback();
+  const epoch = ++sessionEpoch;
+
   if (!isListening) {
     if (!settings.apiKey) {
       showToast('請先填入 Gemini API Key 才能啟用即時聆聽');
       openSettings();
+      return;
+    }
+    if (!isOnline) {
+      showToast('目前處於離線狀態，請確認網路連線');
       return;
     }
     try {
@@ -1225,7 +1438,8 @@ async function toggleListening() {
         haptic(15);
         syncWakeLock();
         updateSwitchUI();
-        await startLiveSession();
+        await startLiveSession({ resume: false, epoch });
+        if (epoch !== sessionEpoch) return;
         showToast('⚡ Live 雙向串流已開啟（螢幕自動防休眠）');
       } else {
         audio.configureVad({
@@ -1233,6 +1447,7 @@ async function toggleListening() {
           silenceMs: Number(settings.silenceMs),
         });
         await audio.startListening();
+        if (epoch !== sessionEpoch) return;
         isListening = true;
         startDraftRecognition(settings.targetLang);
         haptic(15);
@@ -1242,6 +1457,7 @@ async function toggleListening() {
         showToast('即時聆聽已開啟（方案 A 極速串流・防休眠）');
       }
     } catch (err) {
+      if (epoch !== sessionEpoch) return;
       console.error(err);
       isListening = false;
       syncWakeLock();
@@ -1267,7 +1483,7 @@ function enqueueVadSegment(wav) {
   upsertDraftCaptionDom('');
   vadQueue.push(wav);
   pendingCount += 1;
-  renderFeed();
+  syncPendingPillDom();
   updateHeaderStatus();
   processVadQueue();
 }
@@ -1314,6 +1530,7 @@ async function processVadQueue() {
         };
         messages.push(msg);
         newlyAdded.push(msg);
+        appendMessageCard(msg);
       }
 
       if (newlyAdded.length > 0) {
@@ -1325,7 +1542,7 @@ async function processVadQueue() {
       showToast(err.message, 3800);
     } finally {
       if (pendingCount > 0) pendingCount -= 1;
-      renderFeed();
+      syncPendingPillDom();
       updateHeaderStatus();
     }
   }
@@ -1506,16 +1723,20 @@ async function handleQuickTextSend() {
     openSettings();
     return;
   }
+  if (!isOnline) {
+    showToast('目前處於離線狀態，無法翻譯');
+    return;
+  }
   els.quickChineseInput.value = '';
   els.quickChineseInput.blur();
   haptic(10);
-  await audio.ensureContext().catch(() => {});
+  audio.unlockPlayback();
   await runOutboundTranslation({ textInput: text });
 }
 
 async function runOutboundTranslation({ wav = null, textInput = null }) {
   pendingCount += 1;
-  renderFeed();
+  syncPendingPillDom();
   updateHeaderStatus();
 
   try {
@@ -1567,13 +1788,14 @@ async function runOutboundTranslation({ wav = null, textInput = null }) {
 
     messages.push(msg);
     saveState();
+    appendMessageCard(msg, true);
   } catch (err) {
     clearStreamingCardDom();
     console.error('Outbound translate error:', err);
     showToast(err.message, 3800);
   } finally {
     if (pendingCount > 0) pendingCount -= 1;
-    renderFeed();
+    syncPendingPillDom();
     updateHeaderStatus();
   }
 }
@@ -1622,10 +1844,14 @@ async function handlePhotoFileSelected(file) {
     openSettings();
     return;
   }
+  if (!isOnline) {
+    showToast('目前處於離線狀態，無法辨識圖片');
+    return;
+  }
 
   haptic(12);
   pendingCount += 1;
-  renderFeed();
+  syncPendingPillDom();
   updateHeaderStatus();
   showToast('正在辨識圖片並翻譯⋯', 2200);
 
@@ -1663,13 +1889,14 @@ async function handlePhotoFileSelected(file) {
 
     messages.push(msg);
     saveState();
+    appendMessageCard(msg, true);
     haptic([10, 30, 14]);
   } catch (err) {
     console.error('Photo translate error:', err);
     showToast(err.message, 3800);
   } finally {
     if (pendingCount > 0) pendingCount -= 1;
-    renderFeed();
+    syncPendingPillDom();
     updateHeaderStatus();
   }
 }
@@ -1940,7 +2167,8 @@ if (els.toneQuickBtn) {
     updateSwitchUI();
     showToast((TONE_META[settings.tone] || TONE_META.natural).toast, 2200);
     if (isListening && isLiveMode && liveConnected) {
-      startLiveSession().catch(() => {});
+      const epoch = ++sessionEpoch;
+      startLiveSession({ resume: false, epoch }).catch(() => {});
     }
   });
 }
@@ -1956,7 +2184,8 @@ els.langBar.addEventListener('click', (e) => {
   if (changed && isListening) {
     if (isLiveMode && liveConnected) {
       showToast(`Live 串流切換語言為「${(TARGET_LANGUAGES[settings.targetLang] || TARGET_LANGUAGES.en).label}」⋯`, 2000);
-      startLiveSession().catch(() => {});
+      const epoch = ++sessionEpoch;
+      startLiveSession({ resume: false, epoch }).catch(() => {});
     } else if (!isLiveMode) {
       startDraftRecognition(settings.targetLang);
     }
@@ -1972,6 +2201,27 @@ els.flushBtn.addEventListener('click', () => {
   const flushed = audio.flushListeningNow();
   if (!flushed) {
     showToast('目前沒有待送出的語音片段');
+  }
+});
+
+window.addEventListener('online', () => {
+  isOnline = true;
+  updateHeaderStatus();
+  showToast('網路已恢復連線', 2000);
+});
+
+window.addEventListener('offline', () => {
+  isOnline = false;
+  updateHeaderStatus();
+  showToast('目前處於離線狀態，等待網路恢復⋯', 3000);
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (els.showcardOverlay.classList.contains('open')) {
+    closeShowcard();
+  } else if (els.settingsSheet.classList.contains('open')) {
+    closeSettings();
   }
 });
 

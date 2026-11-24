@@ -5,8 +5,8 @@
  * and 24kHz PCM audio caching.
  */
 
-import { TARGET_LANGUAGES, TONE_PRESETS } from './gemini.js?v=2.4';
-import { uint8ToBase64, base64ToUint8 } from './audio.js?v=2.4';
+import { TARGET_LANGUAGES, TONE_PRESETS } from './gemini.js?v=2.5';
+import { uint8ToBase64, base64ToUint8 } from './audio.js?v=2.5';
 
 const LIVE_WS_ENDPOINT =
   'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
@@ -15,15 +15,10 @@ export function buildLiveSystemInstruction(targetLang = 'en', tone = 'natural') 
   const langInfo = TARGET_LANGUAGES[targetLang] || TARGET_LANGUAGES.en;
   const toneDesc = TONE_PRESETS[tone] || TONE_PRESETS.natural;
 
-  return `你是一位專業的即時同步口譯員（Simultaneous Interpreter），專門在「繁體中文（台灣用語）」與「${langInfo.label}（${langInfo.nativeName}）以及其他外語」之間進行雙向口譯。
-
-請嚴格遵守以下口譯規則：
-1. 你**只做翻譯**，絕對不要回答問題、不要聊天、不要寒暄、不要加任何解釋或前言（例如不要說「好的」「翻譯如下」）。
-2. 當你聽到**非中文**（英語、日語、瑞典語或其他外語）時：
-   - 立刻翻成自然流暢的**繁體中文（台灣慣用語）**。
-3. 當你聽到**中文**（國語／華語／普通話）時：
-   - 立刻翻成自然道地的**${langInfo.label}（${langInfo.nativeName}）**，語氣風格：${toneDesc}。
-4. 若音訊只是背景雜音、咳嗽或無法辨識的片段，請保持安靜，不要捏造內容。`;
+  return `你是即時同步口譯員，只做雙向翻譯，絕不聊天、不回答問題、不加前言。
+- 聽到非中文（英／日／瑞典等）：直接翻成自然繁體中文（台灣用語）。
+- 聽到中文：直接翻成自然道地的${langInfo.label}（${langInfo.nativeName}），語氣：${toneDesc}。
+- 若只有雜音或無語音，保持靜默。`;
 }
 
 export class GeminiLiveClient {
@@ -33,6 +28,7 @@ export class GeminiLiveClient {
     this.setupDone = false;
     this.intentionalClose = false;
     this.model = 'gemini-3.8-live';
+    this.resumptionHandle = '';
 
     // Current in-flight turn accumulators
     this.turnInputText = '';
@@ -55,8 +51,10 @@ export class GeminiLiveClient {
     targetLang = 'en',
     tone = 'natural',
     voiceName = 'Kore',
+    resume = false,
   }) {
-    this.disconnect();
+    const handleToUse = resume ? this.resumptionHandle : '';
+    this.disconnect(!resume);
 
     if (!apiKey || !apiKey.trim()) {
       return Promise.reject(new Error('尚未設定 Gemini API Key'));
@@ -86,7 +84,7 @@ export class GeminiLiveClient {
 
       const timeoutId = setTimeout(() => {
         if (!this.setupDone) {
-          this.disconnect();
+          this.disconnect(true);
           fail(new Error('Live 串流連線逾時，請檢查網路或切換備用 Live 模型'));
         }
       }, 12000);
@@ -110,7 +108,8 @@ export class GeminiLiveClient {
 
         // Verified v1beta BidiGenerateContentSetup payload for native-audio Live models:
         // - responseModalities: ["AUDIO"] (required by native-audio models)
-        // - inputAudioTranscription & outputAudioTranscription enabled for live text captions
+        // - inputAudioTranscription & outputAudioTranscription for live text captions
+        // - contextWindowCompression + sessionResumption for uninterrupted >10m sessions
         // - Omit thinkingConfig / proactiveAudio / enableAffectiveDialog for gemini-3.8-live compatibility
         const setupPayload = {
           setup: {
@@ -130,6 +129,10 @@ export class GeminiLiveClient {
             },
             inputAudioTranscription: {},
             outputAudioTranscription: {},
+            contextWindowCompression: {
+              slidingWindow: {},
+            },
+            sessionResumption: handleToUse ? { handle: handleToUse } : {},
           },
         };
 
@@ -194,10 +197,13 @@ export class GeminiLiveClient {
     });
   }
 
-  disconnect() {
+  disconnect(clearResumption = true) {
     this.intentionalClose = true;
     this.connected = false;
     this.setupDone = false;
+    if (clearResumption) {
+      this.resumptionHandle = '';
+    }
     this._resetTurnState();
     if (this.ws) {
       try {
@@ -293,6 +299,10 @@ export class GeminiLiveClient {
       this._emitState('ready');
       if (onSetupComplete) onSetupComplete();
       return;
+    }
+
+    if (msg.sessionResumptionUpdate && msg.sessionResumptionUpdate.newHandle) {
+      this.resumptionHandle = msg.sessionResumptionUpdate.newHandle;
     }
 
     if (msg.goAway) {

@@ -236,6 +236,9 @@ export class AudioEngine {
     // Dedicated speaker playback state (decoupled from getUserMedia)
     this.playCtx = null;
     this.playerEl = null;
+    this._workletLoadedCtx = null;
+    this._htmlAudioUnlocked = false;
+    this._playCtxUnlocked = false;
     this._activeObjectUrl = null;
     this._activeUtterance = null;
     this.currentSource = null;
@@ -251,8 +254,9 @@ export class AudioEngine {
     if (!AudioCtx) {
       throw new Error('此瀏覽器不支援 Web Audio API');
     }
-    if (!this.ctx) {
+    if (!this.ctx || this.ctx.state === 'closed') {
       this.ctx = new AudioCtx();
+      this._workletLoadedCtx = null;
     }
     if (this.ctx.state === 'suspended') {
       await this.ctx.resume();
@@ -267,6 +271,7 @@ export class AudioEngine {
     }
     if (!this.playCtx || this.playCtx.state === 'closed') {
       this.playCtx = new AudioCtx();
+      this._playCtxUnlocked = false;
     }
     if (this.playCtx.state === 'suspended') {
       await this.playCtx.resume();
@@ -276,7 +281,7 @@ export class AudioEngine {
 
   /**
    * Call synchronously inside a user click/tap gesture before async TTS fetch
-   * so browsers unlock both HTMLAudioElement and the dedicated playback AudioContext.
+   * so iOS Safari & Chrome unlock both HTMLAudioElement and the dedicated playback AudioContext.
    */
   unlockPlayback() {
     try {
@@ -284,16 +289,42 @@ export class AudioEngine {
       if (AudioCtx) {
         if (!this.playCtx || this.playCtx.state === 'closed') {
           this.playCtx = new AudioCtx();
+          this._playCtxUnlocked = false;
         }
         if (this.playCtx.state === 'suspended') {
           this.playCtx.resume().catch(() => {});
         }
+        if (!this._playCtxUnlocked) {
+          // Standard 1-sample silent buffer unlocks Web Audio output on iOS Safari
+          const silentBuf = this.playCtx.createBuffer(1, 1, 22050);
+          const src = this.playCtx.createBufferSource();
+          src.buffer = silentBuf;
+          src.connect(this.playCtx.destination);
+          src.start(0);
+          this._playCtxUnlocked = true;
+        }
       }
-      if (!this.playerEl && typeof Audio !== 'undefined') {
-        const el = new Audio();
-        el.playsInline = true;
-        el.preload = 'auto';
-        this.playerEl = el;
+      if (typeof Audio !== 'undefined') {
+        if (!this.playerEl) {
+          const el = new Audio();
+          el.playsInline = true;
+          el.preload = 'auto';
+          this.playerEl = el;
+        }
+        if (!this._htmlAudioUnlocked && !this.playingId) {
+          // 1-sample silent WAV data URI unlocks HTMLAudioElement for post-await async playback on iOS Safari
+          this._htmlAudioUnlocked = true;
+          const el = this.playerEl;
+          el.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+          const p = el.play();
+          if (p && typeof p.then === 'function') {
+            p.then(() => {
+              if (!this.playingId) el.pause();
+            }).catch(() => {
+              this._htmlAudioUnlocked = false;
+            });
+          }
+        }
       }
     } catch (_) {}
   }
@@ -333,24 +364,27 @@ export class AudioEngine {
     let workletReady = false;
     if (this.ctx.audioWorklet && typeof AudioWorkletNode !== 'undefined') {
       try {
-        const workletCode = `
-          class PcmCaptureProcessor extends AudioWorkletProcessor {
-            process(inputs) {
-              const input = inputs[0];
-              if (input && input[0] && input[0].length > 0) {
-                this.port.postMessage(new Float32Array(input[0]));
+        if (this._workletLoadedCtx !== this.ctx) {
+          const workletCode = `
+            class PcmCaptureProcessor extends AudioWorkletProcessor {
+              process(inputs) {
+                const input = inputs[0];
+                if (input && input[0] && input[0].length > 0) {
+                  this.port.postMessage(new Float32Array(input[0]));
+                }
+                return true;
               }
-              return true;
             }
+            registerProcessor('pcm-capture-processor', PcmCaptureProcessor);
+          `;
+          const blob = new Blob([workletCode], { type: 'application/javascript' });
+          const url = URL.createObjectURL(blob);
+          try {
+            await this.ctx.audioWorklet.addModule(url);
+            this._workletLoadedCtx = this.ctx;
+          } finally {
+            URL.revokeObjectURL(url);
           }
-          registerProcessor('pcm-capture-processor', PcmCaptureProcessor);
-        `;
-        const blob = new Blob([workletCode], { type: 'application/javascript' });
-        const url = URL.createObjectURL(blob);
-        try {
-          await this.ctx.audioWorklet.addModule(url);
-        } finally {
-          URL.revokeObjectURL(url);
         }
         const node = new AudioWorkletNode(this.ctx, 'pcm-capture-processor');
         node.port.onmessage = (e) => this._handleAudioFrame(e.data);
@@ -643,6 +677,15 @@ export class AudioEngine {
       const oldestKey = this.ttsCache.keys().next().value;
       this.ttsCache.delete(oldestKey);
     }
+  }
+
+  cacheGeminiAudio(cacheKey, base64Data, mimeType) {
+    if (!cacheKey || !base64Data) return false;
+    const rawBytes = base64ToUint8(base64Data);
+    const entry = this._normalizeToPlayableBytes(rawBytes, mimeType);
+    if (!entry) return false;
+    this._putTtsCache(cacheKey, entry);
+    return true;
   }
 
   /**

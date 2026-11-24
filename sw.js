@@ -1,12 +1,12 @@
-const CACHE_NAME = 'personal-translator-v2.4';
+const CACHE_NAME = 'personal-translator-v2.5';
 const APP_SHELL = [
   './',
   './index.html',
-  './styles.css?v=2.4',
-  './app.js?v=2.4',
-  './audio.js?v=2.4',
-  './gemini.js?v=2.4',
-  './live.js?v=2.4',
+  './styles.css?v=2.5',
+  './app.js?v=2.5',
+  './audio.js?v=2.5',
+  './gemini.js?v=2.5',
+  './live.js?v=2.5',
   './manifest.json',
   './icon.svg',
   './icon-192.png',
@@ -36,8 +36,11 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  const isNav = event.request.mode === 'navigate' || url.pathname.endsWith('/') || url.pathname.endsWith('/index.html');
+  const fetchReq = isNav ? new Request(event.request, { cache: 'no-cache' }) : event.request;
+
   event.respondWith(
-    fetch(event.request)
+    fetch(fetchReq)
       .then((resp) => {
         if (resp && resp.status === 200 && url.origin === self.location.origin) {
           const copy = resp.clone();

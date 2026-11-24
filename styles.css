@@ -353,6 +353,23 @@ button {
   transform: scale(0.99);
 }
 
+@media (max-width: 380px) {
+  .switch-deck {
+    padding: 7px 10px;
+    gap: 6px;
+  }
+  .switch-card {
+    padding: 8px 9px;
+    gap: 6px;
+  }
+  .switch-label {
+    font-size: 12.2px;
+  }
+  .switch-sub {
+    font-size: 10.5px;
+  }
+}
+
 .switch-card.listen-on {
   background: var(--live-soft);
   border-color: rgba(200, 75, 49, 0.32);

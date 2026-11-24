@@ -71,21 +71,58 @@ function friendlyApiError(status, bodyText) {
   return new Error(`Gemini API 錯誤 (${status})：${detail || '未知錯誤'}`);
 }
 
-async function postGenerateContent(apiKey, model, payload, signal) {
+async function fetchWithTimeout(url, options, timeoutMs = 22000, externalSignal = null) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      clearTimeout(timer);
+      controller.abort();
+    } else {
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
+
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (timedOut) {
+      throw new Error('網路連線逾時，請檢查訊號後重試。');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    if (externalSignal) {
+      externalSignal.removeEventListener('abort', onExternalAbort);
+    }
+  }
+}
+
+async function postGenerateContent(apiKey, model, payload, signal, timeoutMs = 24000) {
   if (!apiKey || !apiKey.trim()) {
     throw new Error('尚未設定 Gemini API Key，請點右上角「設定」填入。');
   }
 
   const url = `${API_BASE}/${encodeURIComponent(model)}:generateContent`;
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey.trim(),
+  const resp = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey.trim(),
+      },
+      body: JSON.stringify(payload),
     },
-    body: JSON.stringify(payload),
-    signal,
-  });
+    timeoutMs,
+    signal
+  );
 
   if (!resp.ok) {
     const text = await resp.text();
@@ -95,21 +132,25 @@ async function postGenerateContent(apiKey, model, payload, signal) {
   return resp.json();
 }
 
-async function postStreamGenerateContent(apiKey, model, payload, onPartialText, signal) {
+async function postStreamGenerateContent(apiKey, model, payload, onPartialText, signal, timeoutMs = 24000) {
   if (!apiKey || !apiKey.trim()) {
     throw new Error('尚未設定 Gemini API Key，請點右上角「設定」填入。');
   }
 
   const url = `${API_BASE}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey.trim(),
+  const resp = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey.trim(),
+      },
+      body: JSON.stringify(payload),
     },
-    body: JSON.stringify(payload),
-    signal,
-  });
+    timeoutMs,
+    signal
+  );
 
   if (!resp.ok) {
     const text = await resp.text();
@@ -240,13 +281,23 @@ function buildThinkingConfig(model) {
   return {};
 }
 
-function safeJsonParse(raw) {
+export function safeJsonParse(raw) {
   if (!raw) return null;
   let cleaned = raw.trim();
   if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   }
-  return JSON.parse(cleaned);
+  try {
+    return JSON.parse(cleaned);
+  } catch (_) {
+    // Recover valid JSON object if wrapped by stray leading/trailing prose
+    const first = cleaned.indexOf('{');
+    const last = cleaned.lastIndexOf('}');
+    if (first >= 0 && last > first) {
+      return JSON.parse(cleaned.slice(first, last + 1));
+    }
+    throw _;
+  }
 }
 
 function looksUntranslatedForZh(zhText, originalText, lang) {
@@ -788,7 +839,7 @@ export async function translateImageWithGemini({
     },
   };
 
-  const data = await postGenerateContent(apiKey, model, payload, signal);
+  const data = await postGenerateContent(apiKey, model, payload, signal, 35000);
   const raw = extractTextPart(data);
   const parsed = safeJsonParse(raw);
 
