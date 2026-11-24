@@ -15,7 +15,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=1.6" />
+  <link rel="stylesheet" href="./styles.css?v=1.7" />
 </head>
 <body>
   <div class="app-shell" id="appShell">
@@ -27,7 +27,7 @@
           <div class="brand-text">
             <div class="brand-title-row" style="display:flex;align-items:center;gap:6px;white-space:nowrap;">
               <h1 class="brand-title">隨身口譯官</h1>
-              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v1.6</button>
+              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v1.7</button>
             </div>
             <div class="status-line">
               <span class="status-dot ready" id="statusDot"></span>
@@ -109,19 +109,19 @@
           </svg>
         </div>
         <h2 class="empty-title">隨時開始口譯</h2>
-        <p class="empty-desc">打開上方「即時聆聽翻譯」聽懂對方說話；點下方按鈕說中文翻給對方看，點句子旁的喇叭即可真人唸出。</p>
+        <p class="empty-desc">輸入或說出任何語言都會自動互譯（外語→中文、中文→英語／日語／瑞典語），點句子旁的喇叭即可唸出。</p>
         <button class="demo-btn" id="emptyDemoBtn" type="button">載入示範對話</button>
       </div>
     </main>
 
-    <!-- Bottom Outbound Dock (My Chinese -> Target Language) -->
+    <!-- Bottom Auto-Bidirectional Dock -->
     <footer class="bottom-dock">
       <div class="quick-text-row">
         <div class="text-input-wrap">
           <input
             type="text"
             id="quickChineseInput"
-            placeholder="打字輸入中文，翻成英語⋯"
+            placeholder="輸入中文或外語，自動互譯（中文 ↔ 英語）⋯"
             autocomplete="off"
           />
           <button class="send-text-btn" id="quickSendBtn" type="button">翻譯</button>
@@ -135,7 +135,7 @@
             <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
             <line x1="12" y1="19" x2="12" y2="23"/>
           </svg>
-          <span id="speakBtnLabel">說中文 → 翻成英語</span>
+          <span id="speakBtnLabel">點擊說話（中文 ↔ 英語）</span>
         </button>
         <button class="cancel-rec-btn" id="cancelRecBtn" type="button">取消</button>
       </div>
@@ -284,6 +284,6 @@
   <!-- Toast -->
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="./app.js?v=1.6"></script>
+  <script type="module" src="./app.js?v=1.7"></script>
 </body>
 </html>

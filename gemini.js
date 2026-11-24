@@ -280,17 +280,17 @@ export async function translateOutboundChinese({
     .map((m) => `${m.speaker}: ${m.zh}${m.original && !m.isChinese ? ` (${m.original})` : ''}`)
     .join('\n');
 
-  const systemInstruction = `你是使用者的專屬隨身口譯官。使用者正在用中文表達想對外國對象說的話，請將其精準、地道地翻譯成「${langInfo.label}（${langInfo.nativeName}）」，以便直接播放語音給對方聽。
+  const systemInstruction = `你是使用者的專屬隨身雙向口譯官。請自動偵測使用者輸入（文字或語音）的語言，並遵守以下雙向翻譯規則：
 
-規則：
-1. 語氣風格：${toneDesc}。
-2. 譯文必須像當地母語者真實會說的話，流暢自然、不要生硬直譯。
-3. 若輸入為音訊：先準確轉寫使用者的中文原話到 \`zh\`，若音訊無有效語音則讓 \`zh\` 與 \`translated\` 皆為空字串。
-4. \`reading\` 欄位：
-   - 目標語言是日語（ja）時，提供假名與羅馬拼音（方便使用者跟著唸，例如：すみません、これはいくらですか (Sumimasen, kore wa ikura desu ka)）。
-   - 目標語言是瑞典語（sv）時，提供簡短重音／發音小提示（可留空若句子很短）。
-   - 目標語言是英語（en）時，留空字串即可。
-5. 只輸出符合 schema 的 JSON。`;
+1. **自動語言判斷與翻譯方向**：
+   - 若輸入是**中文**（繁體／簡體／台灣華語）：設 \`source_lang\` 為 \`"zh"\`、\`target_lang\` 為 \`"${langInfo.code}"\`，將其自然地道地翻譯成「${langInfo.label}（${langInfo.nativeName}）」，語氣風格：${toneDesc}。
+   - 若輸入是**非中文**（英語、日語、瑞典語或任何其他外語）：設 \`source_lang\` 為該語言的 ISO 639-1 代碼（如 \`"en"\`、\`"ja"\`、\`"sv"\`），設 \`target_lang\` 為 \`"zh"\`，將其翻譯成自然流暢的**繁體中文（台灣慣用語）**。
+2. \`source_text\`：
+   - 若輸入為文字，填入使用者原始文字；若輸入為音訊，先精準轉寫原話。若音訊無有效語音則讓 \`source_text\` 與 \`translated\` 皆為空字串。
+3. \`reading\` 欄位：
+   - 僅當 \`target_lang\` 為日語（\`ja\`）時，提供假名與羅馬拼音（例如：おげんきですか (Ogenki desu ka)）。
+   - 當 \`target_lang\` 為瑞典語（\`sv\`）且有必要時，提供簡短重音提示；其餘情況（包含翻成中文或英語）留空字串即可。
+4. 譯文必須自然像母語者說的話，不要生硬直譯。只輸出符合 schema 的 JSON。`;
 
   const parts = [];
   if (wavBase64) {
@@ -305,8 +305,8 @@ export async function translateOutboundChinese({
   const promptText = [
     contextLines ? `【目前對話上下文（幫助代名詞與語氣銜接）】\n${contextLines}` : '',
     textInput
-      ? `【使用者想說的中文】\n${textInput}\n\n請翻譯成 ${langInfo.label}（${langInfo.nativeName}）。`
-      : `請聽這段中文語音，轉寫為繁體中文並翻譯成 ${langInfo.label}（${langInfo.nativeName}）。`,
+      ? `【使用者輸入文字】\n${textInput}\n\n請自動判斷語言：若是中文請翻成 ${langInfo.label}（${langInfo.nativeName}）；若是非中文請翻成繁體中文。`
+      : `請聽這段語音並自動判斷語言：若是中文請翻成 ${langInfo.label}（${langInfo.nativeName}）；若是非中文請翻成繁體中文。`,
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -324,26 +324,34 @@ export async function translateOutboundChinese({
       },
     ],
     generationConfig: {
-      temperature: 0.25,
+      temperature: 0.2,
       ...buildThinkingConfig(model),
       responseMimeType: 'application/json',
       responseSchema: {
         type: 'OBJECT',
         properties: {
-          zh: {
+          source_lang: {
             type: 'STRING',
-            description: '使用者說的繁體中文原話',
+            description: '偵測到的輸入語言 ISO 639-1 代碼，例如 zh, en, ja, sv',
+          },
+          target_lang: {
+            type: 'STRING',
+            description: `輸出譯文語言代碼：輸入為中文時為 ${langInfo.code}，輸入為非中文時為 zh`,
+          },
+          source_text: {
+            type: 'STRING',
+            description: '原始輸入文字或語音轉寫稿',
           },
           translated: {
             type: 'STRING',
-            description: `地道自然的${langInfo.label}譯文`,
+            description: '自然道地的譯文',
           },
           reading: {
             type: 'STRING',
-            description: '發音輔助（日文假名/羅馬音，或其他必要提示；英語留空）',
+            description: '日語假名/羅馬音或瑞典語簡短重音提示；其餘留空',
           },
         },
-        required: ['zh', 'translated', 'reading'],
+        required: ['source_lang', 'target_lang', 'source_text', 'translated', 'reading'],
       },
     },
   };
@@ -356,11 +364,20 @@ export async function translateOutboundChinese({
     return null;
   }
 
+  const sourceLang = String(parsed.source_lang || 'zh').trim().toLowerCase().slice(0, 8);
+  const isSourceChinese = sourceLang.startsWith('zh');
+  const resolvedTargetLang = isSourceChinese ? langInfo.code : 'zh';
+  const sourceText = String(parsed.source_text || textInput || '').trim();
+  const translated = String(parsed.translated || '').trim();
+
   return {
-    zh: String(parsed.zh || textInput || '').trim(),
-    translated: String(parsed.translated || '').trim(),
-    reading: String(parsed.reading || '').trim(),
-    targetLang: langInfo.code,
+    sourceLang: isSourceChinese ? 'zh' : sourceLang,
+    targetLang: resolvedTargetLang,
+    isSourceChinese,
+    sourceText,
+    zh: isSourceChinese ? sourceText : translated,
+    translated,
+    reading: isSourceChinese ? String(parsed.reading || '').trim() : '',
   };
 }
 

@@ -212,9 +212,9 @@ function updateSwitchUI() {
     btn.classList.toggle('active', btn.dataset.lang === settings.targetLang);
   });
 
-  els.quickChineseInput.placeholder = `打字輸入中文，翻成${langInfo.label}⋯`;
+  els.quickChineseInput.placeholder = `輸入中文或外語，自動互譯（中文 ↔ ${langInfo.label}）⋯`;
   if (!isManualRecording) {
-    els.speakBtnLabel.textContent = `說中文 → 翻成${langInfo.label}`;
+    els.speakBtnLabel.textContent = `點擊說話（中文 ↔ ${langInfo.label}）`;
   }
 
   // Setup banner
@@ -224,6 +224,7 @@ function updateSwitchUI() {
 
 function speakerColorClass(speakerCode, isOutbound) {
   if (isOutbound || speakerCode === '我') return 'sp-me';
+  if (speakerCode === '譯') return 'sp-a';
   const ch = String(speakerCode || 'A').toUpperCase().charCodeAt(0) - 65;
   const classes = ['sp-a', 'sp-b', 'sp-c', 'sp-d'];
   return classes[((ch % classes.length) + classes.length) % classes.length];
@@ -295,9 +296,9 @@ function createMessageCard(msg) {
   const spBtn = document.createElement('button');
   spBtn.type = 'button';
   spBtn.className = `speaker-badge ${spClass}`;
-  spBtn.textContent = `${spName}:`;
-  spBtn.title = isOutbound ? '你說的中文' : '點擊重新命名這位說話者';
-  if (!isOutbound) {
+  spBtn.textContent = msg.speaker === '譯' ? '譯' : `${spName}:`;
+  spBtn.title = isOutbound || msg.speaker === '譯' ? '自動互譯' : '點擊重新命名這位說話者';
+  if (!isOutbound && msg.speaker !== '譯') {
     spBtn.addEventListener('click', () => renameSpeaker(msg.speaker));
   }
 
