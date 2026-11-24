@@ -5,8 +5,8 @@
  * and 24kHz PCM audio caching.
  */
 
-import { TARGET_LANGUAGES, TONE_PRESETS } from './gemini.js?v=2.3';
-import { uint8ToBase64, base64ToUint8 } from './audio.js?v=2.3';
+import { TARGET_LANGUAGES, TONE_PRESETS } from './gemini.js?v=2.4';
+import { uint8ToBase64, base64ToUint8 } from './audio.js?v=2.4';
 
 const LIVE_WS_ENDPOINT =
   'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';

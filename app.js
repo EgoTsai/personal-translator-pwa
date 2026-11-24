@@ -2,7 +2,7 @@
  * app.js — Main UI controller for 隨身口譯官 PWA
  */
 
-import { AudioEngine } from './audio.js?v=2.3';
+import { AudioEngine } from './audio.js?v=2.4';
 import {
   TARGET_LANGUAGES,
   ICEBREAKER_BANNERS,
@@ -11,8 +11,8 @@ import {
   translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
-} from './gemini.js?v=2.3';
-import { GeminiLiveClient } from './live.js?v=2.3';
+} from './gemini.js?v=2.4';
+import { GeminiLiveClient } from './live.js?v=2.4';
 
 const STORAGE_KEYS = {
   settings: 'pt_settings_v1',
@@ -2076,8 +2076,8 @@ els.testVoiceBtn.addEventListener('click', async () => {
   const voiceName = els.voiceSelect.value;
   const sampleText = '你好，我是你的專屬隨身口譯官。Nice to meet you. よろしくお願いします。Trevligt att träffas!';
 
+  audio.unlockPlayback();
   try {
-    await audio.ensureContext();
     if (ttsModel === 'browser' || !key) {
       await audio.speakBrowserFallback('__preview__', '你好，這是瀏覽器內建語音試聽。', 'zh');
       return;
@@ -2136,14 +2136,6 @@ if (versionBadgeEl) {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./sw.js').catch(() => {});
-  });
-}
-
-// Init
-applyTheme();
-updateSwitchUI();
-renderFeed();
-s').catch(() => {});
   });
 }
 
