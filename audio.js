@@ -139,10 +139,59 @@ export function parsePcmSampleRate(mimeType) {
 }
 
 /**
- * Shared unlocked AudioContext manager (essential for iOS Safari PWA audio playback).
+ * Wrap raw 16-bit little-endian mono PCM bytes in a standard 44-byte RIFF/WAVE container.
+ */
+export function wrapPcm16ToWavBytes(pcmBytes, sampleRate = 24000) {
+  const usableLen = pcmBytes.byteLength - (pcmBytes.byteLength % 2);
+  const buffer = new ArrayBuffer(44 + usableLen);
+  const view = new DataView(buffer);
+
+  writeAscii(view, 0, 'RIFF');
+  view.setUint32(4, 36 + usableLen, true);
+  writeAscii(view, 8, 'WAVE');
+  writeAscii(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(view, 36, 'data');
+  view.setUint32(40, usableLen, true);
+
+  const out = new Uint8Array(buffer);
+  out.set(pcmBytes.subarray(0, usableLen), 44);
+  return out;
+}
+
+/**
+ * Check whether raw 16-bit LE mono PCM bytes contain real audible speech (not empty/silence).
+ */
+export function hasAudiblePcm(pcmBytes, sampleRate = 24000, minDurationSec = 0.16, minPeak = 200) {
+  if (!pcmBytes || pcmBytes.byteLength < 4) return false;
+  const sampleCount = Math.floor(pcmBytes.byteLength / 2);
+  if (sampleCount / sampleRate < minDurationSec) return false;
+  const view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, sampleCount * 2);
+  let peak = 0;
+  const step = Math.max(1, Math.floor(sampleCount / 4000));
+  for (let i = 0; i < sampleCount; i += step) {
+    const abs = Math.abs(view.getInt16(i * 2, true));
+    if (abs > peak) {
+      peak = abs;
+      if (peak >= minPeak) return true;
+    }
+  }
+  return peak >= minPeak;
+}
+
+/**
+ * Shared AudioEngine with separate mic-capture AudioContext and dedicated playback
+ * HTMLAudioElement + playback AudioContext (prevents Windows Bluetooth HFP/A2DP & iOS Safari mute bugs).
  */
 export class AudioEngine {
   constructor() {
+    // Mic capture context (isolated from speaker playback!)
     this.ctx = null;
     this.stream = null;
     this.sourceNode = null;
@@ -184,11 +233,15 @@ export class AudioEngine {
     this.onVadSegment = null; // (wavPayload) => void
     this.onVadStateChange = null; // (speaking: boolean) => void
 
-    // Playback state
+    // Dedicated speaker playback state (decoupled from getUserMedia)
+    this.playCtx = null;
+    this.playerEl = null;
+    this._activeObjectUrl = null;
+    this._activeUtterance = null;
     this.currentSource = null;
     this.livePlaybackSources = [];
     this.livePlaybackCursor = 0;
-    this.ttsCache = new Map();
+    this.ttsCache = new Map(); // cacheKey -> { bytes: Uint8Array, mimeType: string }
     this.onPlaybackChange = null; // (playingId | null) => void
     this.playingId = null;
   }
@@ -205,6 +258,44 @@ export class AudioEngine {
       await this.ctx.resume();
     }
     return this.ctx;
+  }
+
+  async ensurePlaybackContext() {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) {
+      throw new Error('此瀏覽器不支援 Web Audio API');
+    }
+    if (!this.playCtx || this.playCtx.state === 'closed') {
+      this.playCtx = new AudioCtx();
+    }
+    if (this.playCtx.state === 'suspended') {
+      await this.playCtx.resume();
+    }
+    return this.playCtx;
+  }
+
+  /**
+   * Call synchronously inside a user click/tap gesture before async TTS fetch
+   * so browsers unlock both HTMLAudioElement and the dedicated playback AudioContext.
+   */
+  unlockPlayback() {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (AudioCtx) {
+        if (!this.playCtx || this.playCtx.state === 'closed') {
+          this.playCtx = new AudioCtx();
+        }
+        if (this.playCtx.state === 'suspended') {
+          this.playCtx.resume().catch(() => {});
+        }
+      }
+      if (!this.playerEl && typeof Audio !== 'undefined') {
+        const el = new Audio();
+        el.playsInline = true;
+        el.preload = 'auto';
+        this.playerEl = el;
+      }
+    } catch (_) {}
   }
 
   configureVad({ threshold, silenceMs }) {
@@ -524,49 +615,53 @@ export class AudioEngine {
     this.ttsCache.clear();
   }
 
+  _normalizeToPlayableBytes(bytes, mimeType) {
+    if (!bytes || bytes.byteLength < 12) return null;
+    const hasRiffHeader =
+      bytes[0] === 0x52 && // R
+      bytes[1] === 0x49 && // I
+      bytes[2] === 0x46 && // F
+      bytes[3] === 0x46;   // F
+    if (hasRiffHeader) {
+      return { bytes, mimeType: 'audio/wav' };
+    }
+    const isRawPcm = !mimeType || /audio\/L16|pcm/i.test(mimeType);
+    if (isRawPcm) {
+      const sampleRate = parsePcmSampleRate(mimeType);
+      return {
+        bytes: wrapPcm16ToWavBytes(bytes, sampleRate),
+        mimeType: 'audio/wav',
+      };
+    }
+    return { bytes, mimeType: mimeType || 'audio/wav' };
+  }
+
+  _putTtsCache(cacheKey, entry) {
+    if (!cacheKey || !entry) return;
+    this.ttsCache.set(cacheKey, entry);
+    if (this.ttsCache.size > 40) {
+      const oldestKey = this.ttsCache.keys().next().value;
+      this.ttsCache.delete(oldestKey);
+    }
+  }
+
   /**
    * Play Gemini TTS response (WAV with RIFF header or raw 24kHz 16-bit PCM).
    */
   async playGeminiAudio(cacheKey, base64Data, mimeType) {
-    const ctx = await this.ensureContext();
     this.stopPlayback();
 
-    let audioBuffer = cacheKey ? this.ttsCache.get(cacheKey) : null;
-
-    if (!audioBuffer) {
-      const bytes = base64ToUint8(base64Data);
-      const hasRiffHeader =
-        bytes.length >= 12 &&
-        bytes[0] === 0x52 && // R
-        bytes[1] === 0x49 && // I
-        bytes[2] === 0x46 && // F
-        bytes[3] === 0x46;   // F
-      const isRawPcm = !hasRiffHeader && (!mimeType || /audio\/L16|pcm/i.test(mimeType));
-
-      if (isRawPcm) {
-        const sampleRate = parsePcmSampleRate(mimeType);
-        const sampleCount = Math.floor(bytes.byteLength / 2);
-        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        audioBuffer = ctx.createBuffer(1, sampleCount, sampleRate);
-        const channel = audioBuffer.getChannelData(0);
-        for (let i = 0; i < sampleCount; i++) {
-          channel[i] = view.getInt16(i * 2, true) / 32768;
-        }
-      } else {
-        const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-        audioBuffer = await ctx.decodeAudioData(copy);
+    let entry = cacheKey ? this.ttsCache.get(cacheKey) : null;
+    if (!entry) {
+      const rawBytes = base64ToUint8(base64Data);
+      entry = this._normalizeToPlayableBytes(rawBytes, mimeType);
+      if (!entry) {
+        throw new Error('語音資料為空，無法播放');
       }
-
-      if (cacheKey) {
-        this.ttsCache.set(cacheKey, audioBuffer);
-        if (this.ttsCache.size > 40) {
-          const oldestKey = this.ttsCache.keys().next().value;
-          this.ttsCache.delete(oldestKey);
-        }
-      }
+      if (cacheKey) this._putTtsCache(cacheKey, entry);
     }
 
-    return this._playBuffer(cacheKey, audioBuffer);
+    return this._playEntry(cacheKey, entry);
   }
 
   hasCachedAudio(cacheKey) {
@@ -574,19 +669,113 @@ export class AudioEngine {
   }
 
   async playCachedAudio(cacheKey) {
-    const buf = this.ttsCache.get(cacheKey);
-    if (!buf) return false;
-    await this.ensureContext();
+    const entry = this.ttsCache.get(cacheKey);
+    if (!entry) return false;
     this.stopPlayback();
-    await this._playBuffer(cacheKey, buf);
+    await this._playEntry(cacheKey, entry);
     return true;
   }
 
-  _playBuffer(id, audioBuffer) {
+  /**
+   * Primary playback via dedicated HTMLAudioElement (immune to Windows Bluetooth HFP/getUserMedia
+   * AudioContext sink bugs and iOS silent-switch WebAudio issues), with automatic fallback
+   * to an isolated playback-only AudioContext if HTMLAudioElement is blocked.
+   */
+  async _playEntry(id, entry) {
+    try {
+      await this._playViaHtmlAudio(id, entry.bytes, entry.mimeType);
+      return;
+    } catch (htmlErr) {
+      console.warn('HTMLAudioElement playback failed, trying playback AudioContext:', htmlErr);
+    }
+    await this._playViaPlayContext(id, entry.bytes);
+  }
+
+  _playViaHtmlAudio(id, bytes, mimeType = 'audio/wav') {
+    return new Promise((resolve, reject) => {
+      if (typeof Audio === 'undefined' || typeof Blob === 'undefined' || typeof URL === 'undefined') {
+        reject(new Error('HTMLAudioElement unavailable'));
+        return;
+      }
+
+      if (!this.playerEl) {
+        this.playerEl = new Audio();
+        this.playerEl.playsInline = true;
+      }
+      const el = this.playerEl;
+
+      if (this._activeObjectUrl) {
+        try { URL.revokeObjectURL(this._activeObjectUrl); } catch (_) {}
+        this._activeObjectUrl = null;
+      }
+
+      const blob = new Blob([bytes], { type: mimeType || 'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      this._activeObjectUrl = url;
+
+      let settled = false;
+      const cleanup = () => {
+        el.onended = null;
+        el.onerror = null;
+        if (this._activeObjectUrl === url) {
+          try { URL.revokeObjectURL(url); } catch (_) {}
+          this._activeObjectUrl = null;
+        }
+      };
+
+      const finishOk = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        this.muted = false;
+        this.muteUntil = performance.now() + 380;
+        if (this.playingId === (id || '__playing__')) {
+          this.playingId = null;
+          if (this.onPlaybackChange) this.onPlaybackChange(null);
+        }
+        resolve();
+      };
+
+      const finishErr = (err) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        this.muted = false;
+        if (this.playingId === (id || '__playing__')) {
+          this.playingId = null;
+          if (this.onPlaybackChange) this.onPlaybackChange(null);
+        }
+        reject(err instanceof Error ? err : new Error('HTMLAudio 播放失敗'));
+      };
+
+      el.onended = finishOk;
+      el.onerror = () => finishErr(new Error('HTMLAudio 解碼或播放失敗'));
+
+      el.volume = 1.0;
+      el.muted = false;
+      el.src = url;
+      el.load();
+
+      this.muted = true;
+      this.playingId = id || '__playing__';
+      if (this.onPlaybackChange) this.onPlaybackChange(this.playingId);
+
+      const playPromise = el.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch(finishErr);
+      }
+    });
+  }
+
+  async _playViaPlayContext(id, wavBytes) {
+    const ctx = await this.ensurePlaybackContext();
+    const copy = wavBytes.buffer.slice(wavBytes.byteOffset, wavBytes.byteOffset + wavBytes.byteLength);
+    const audioBuffer = await ctx.decodeAudioData(copy);
+
     return new Promise((resolve) => {
-      const src = this.ctx.createBufferSource();
+      const src = ctx.createBufferSource();
       src.buffer = audioBuffer;
-      src.connect(this.ctx.destination);
+      src.connect(ctx.destination);
 
       this.currentSource = src;
       this.muted = true;
@@ -628,10 +817,11 @@ export class AudioEngine {
   }
 
   /**
-   * Free fallback TTS via Web Speech API.
+   * Free fallback TTS via Web Speech API (hardened against Chrome cancel()/resume()/GC quirks).
    */
   async speakBrowserFallback(id, text, langCode) {
     if (!('speechSynthesis' in window)) return;
+    const wasSpeaking = window.speechSynthesis.speaking || window.speechSynthesis.pending;
     this.stopPlayback();
 
     const langMap = {
@@ -643,79 +833,88 @@ export class AudioEngine {
     const targetLang = langMap[langCode] || langCode || 'zh-TW';
     const voices = await this._loadBrowserVoices();
 
+    if (wasSpeaking) {
+      await new Promise((r) => setTimeout(r, 40));
+    }
+
     return new Promise((resolve) => {
       const utter = new SpeechSynthesisUtterance(text);
       utter.lang = targetLang;
       utter.rate = 1.0;
+      utter.volume = 1.0;
 
       const prefix = targetLang.toLowerCase().slice(0, 2);
       const exact = voices.find((v) => v.lang.toLowerCase() === targetLang.toLowerCase());
       const loose = voices.find((v) => v.lang.toLowerCase().startsWith(prefix));
       if (exact || loose) utter.voice = exact || loose;
 
+      this._activeUtterance = utter;
       this.muted = true;
       this.playingId = id || '__speech__';
       if (this.onPlaybackChange) this.onPlaybackChange(this.playingId);
 
+      let settled = false;
+      const safetyTimer = setTimeout(() => finish(), 18000);
+
       const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(safetyTimer);
+        if (this._activeUtterance === utter) this._activeUtterance = null;
         this.muted = false;
         this.muteUntil = performance.now() + 380;
-        this.playingId = null;
-        if (this.onPlaybackChange) this.onPlaybackChange(null);
+        if (this.playingId === (id || '__speech__')) {
+          this.playingId = null;
+          if (this.onPlaybackChange) this.onPlaybackChange(null);
+        }
         resolve();
       };
 
       utter.onend = finish;
       utter.onerror = finish;
+      try {
+        window.speechSynthesis.resume();
+      } catch (_) {}
       window.speechSynthesis.speak(utter);
     });
   }
 
   /**
-   * Stitch raw 16-bit LE PCM chunks (e.g. from Gemini Live 24kHz audio) into a single AudioBuffer.
+   * Stitch raw 16-bit LE PCM chunks from Gemini Live into a RIFF WAV entry and cache ONLY if audible.
    */
-  async pcmChunksToAudioBuffer(uint8Chunks, sampleRate = 24000) {
-    if (!Array.isArray(uint8Chunks) || uint8Chunks.length === 0) return null;
+  cacheLivePcmChunks(cacheKey, uint8Chunks, sampleRate = 24000) {
+    if (!cacheKey || !Array.isArray(uint8Chunks) || uint8Chunks.length === 0) return false;
     let totalBytes = 0;
     for (const c of uint8Chunks) totalBytes += c.byteLength;
-    const sampleCount = Math.floor(totalBytes / 2);
-    if (sampleCount <= 0) return null;
+    const usableBytes = totalBytes - (totalBytes % 2);
+    if (usableBytes < 4) return false;
 
-    const ctx = await this.ensureContext();
-    const merged = new Uint8Array(sampleCount * 2);
+    const merged = new Uint8Array(usableBytes);
     let offset = 0;
     for (const c of uint8Chunks) {
-      const copyLen = Math.min(c.byteLength, merged.byteLength - offset);
+      const copyLen = Math.min(c.byteLength, usableBytes - offset);
       if (copyLen > 0) {
         merged.set(c.subarray(0, copyLen), offset);
         offset += copyLen;
       }
     }
 
-    const view = new DataView(merged.buffer, merged.byteOffset, merged.byteLength);
-    const audioBuffer = ctx.createBuffer(1, sampleCount, sampleRate);
-    const channel = audioBuffer.getChannelData(0);
-    for (let i = 0; i < sampleCount; i++) {
-      channel[i] = view.getInt16(i * 2, true) / 32768;
+    // Guard against Gemini Live turns that return silence/near-empty audio alongside text
+    if (!hasAudiblePcm(merged, sampleRate)) {
+      return false;
     }
-    return audioBuffer;
-  }
 
-  cacheAudioBuffer(cacheKey, audioBuffer) {
-    if (!cacheKey || !audioBuffer) return;
-    this.ttsCache.set(cacheKey, audioBuffer);
-    if (this.ttsCache.size > 40) {
-      const oldestKey = this.ttsCache.keys().next().value;
-      this.ttsCache.delete(oldestKey);
-    }
+    const wavBytes = wrapPcm16ToWavBytes(merged, sampleRate);
+    this._putTtsCache(cacheKey, { bytes: wavBytes, mimeType: 'audio/wav' });
+    return true;
   }
 
   /**
-   * Optional real-time gapless playback for Gemini Live 24kHz PCM chunks (echo-guarded).
+   * Optional real-time gapless playback for Gemini Live 24kHz PCM chunks (uses isolated playCtx).
    */
   async enqueueLiveAudioChunk(uint8Bytes, sampleRate = 24000) {
     if (!uint8Bytes || uint8Bytes.byteLength < 2) return;
-    const ctx = await this.ensureContext();
+    const ctx = await this.ensurePlaybackContext();
     const sampleCount = Math.floor(uint8Bytes.byteLength / 2);
     const view = new DataView(uint8Bytes.buffer, uint8Bytes.byteOffset, uint8Bytes.byteLength);
     const audioBuffer = ctx.createBuffer(1, sampleCount, sampleRate);
@@ -756,13 +955,26 @@ export class AudioEngine {
 
   stopPlayback() {
     this.stopLivePlayback();
+    if (this.playerEl) {
+      try {
+        this.playerEl.onended = null;
+        this.playerEl.onerror = null;
+        this.playerEl.pause();
+        this.playerEl.currentTime = 0;
+      } catch (_) {}
+    }
+    if (this._activeObjectUrl) {
+      try { URL.revokeObjectURL(this._activeObjectUrl); } catch (_) {}
+      this._activeObjectUrl = null;
+    }
     if (this.currentSource) {
       try { this.currentSource.stop(); } catch (_) {}
       this.currentSource = null;
     }
-    if ('speechSynthesis' in window) {
+    if ('speechSynthesis' in window && (window.speechSynthesis.speaking || window.speechSynthesis.pending)) {
       try { window.speechSynthesis.cancel(); } catch (_) {}
     }
+    this._activeUtterance = null;
     this.muted = false;
     if (this.playingId !== null) {
       this.playingId = null;

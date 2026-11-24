@@ -2,7 +2,7 @@
  * app.js — Main UI controller for 隨身口譯官 PWA
  */
 
-import { AudioEngine } from './audio.js?v=2.2';
+import { AudioEngine } from './audio.js?v=2.3';
 import {
   TARGET_LANGUAGES,
   ICEBREAKER_BANNERS,
@@ -11,8 +11,8 @@ import {
   translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
-} from './gemini.js?v=2.2';
-import { GeminiLiveClient } from './live.js?v=2.2';
+} from './gemini.js?v=2.3';
+import { GeminiLiveClient } from './live.js?v=2.3';
 
 const STORAGE_KEYS = {
   settings: 'pt_settings_v1',
@@ -828,8 +828,9 @@ function renameSpeaker(speakerCode) {
 async function speakMessage(msgOrId, text, langCode) {
   const cacheId = typeof msgOrId === 'string' ? msgOrId : msgOrId?.id;
   if (!text) return;
+  // Unlock dedicated speaker playback synchronously inside the user tap gesture
+  audio.unlockPlayback();
   try {
-    await audio.ensureContext();
     if (audio.hasCachedAudio(cacheId)) {
       await audio.playCachedAudio(cacheId);
       return;
@@ -848,6 +849,7 @@ async function speakMessage(msgOrId, text, langCode) {
         langCode,
       });
       loadingSpeakId = null;
+      syncPlaybackButtons();
       await audio.playGeminiAudio(cacheId, base64, mimeType);
     } else {
       if (settings.ttsModel !== 'browser' && !settings.apiKey) {
@@ -1093,11 +1095,10 @@ liveClient.onTurnComplete = async ({ inputText, outputText, pcmChunks, sampleRat
     };
   }
 
-  // Cache returned 24kHz PCM directly under msg.id so tapping 🔊 plays with 0ms latency & 0 extra TTS cost!
+  // Cache returned 24kHz PCM directly under msg.id ONLY if genuinely audible (0ms replay & 0 extra TTS cost)
   if (Array.isArray(pcmChunks) && pcmChunks.length > 0) {
     try {
-      const audioBuffer = await audio.pcmChunksToAudioBuffer(pcmChunks, sampleRate || 24000);
-      if (audioBuffer) audio.cacheAudioBuffer(msg.id, audioBuffer);
+      audio.cacheLivePcmChunks(msg.id, pcmChunks, sampleRate || 24000);
     } catch (_) {}
   }
 
@@ -2135,6 +2136,14 @@ if (versionBadgeEl) {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./sw.js').catch(() => {});
+  });
+}
+
+// Init
+applyTheme();
+updateSwitchUI();
+renderFeed();
+s').catch(() => {});
   });
 }
 
