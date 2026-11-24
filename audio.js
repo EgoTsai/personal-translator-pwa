@@ -430,8 +430,12 @@ export class AudioEngine {
     return false;
   }
 
+  clearTtsCache() {
+    this.ttsCache.clear();
+  }
+
   /**
-   * Play Gemini TTS response (raw 24kHz 16-bit PCM or standard encoded audio).
+   * Play Gemini TTS response (WAV with RIFF header or raw 24kHz 16-bit PCM).
    */
   async playGeminiAudio(cacheKey, base64Data, mimeType) {
     const ctx = await this.ensureContext();
@@ -441,7 +445,13 @@ export class AudioEngine {
 
     if (!audioBuffer) {
       const bytes = base64ToUint8(base64Data);
-      const isRawPcm = !mimeType || /audio\/L16|pcm/i.test(mimeType);
+      const hasRiffHeader =
+        bytes.length >= 12 &&
+        bytes[0] === 0x52 && // R
+        bytes[1] === 0x49 && // I
+        bytes[2] === 0x46 && // F
+        bytes[3] === 0x46;   // F
+      const isRawPcm = !hasRiffHeader && (!mimeType || /audio\/L16|pcm/i.test(mimeType));
 
       if (isRawPcm) {
         const sampleRate = parsePcmSampleRate(mimeType);
@@ -459,7 +469,6 @@ export class AudioEngine {
 
       if (cacheKey) {
         this.ttsCache.set(cacheKey, audioBuffer);
-        // Cap cache size to 40 clips
         if (this.ttsCache.size > 40) {
           const oldestKey = this.ttsCache.keys().next().value;
           this.ttsCache.delete(oldestKey);
@@ -509,31 +518,50 @@ export class AudioEngine {
     });
   }
 
+  _loadBrowserVoices() {
+    return new Promise((resolve) => {
+      const existing = window.speechSynthesis.getVoices();
+      if (existing && existing.length > 0) {
+        resolve(existing);
+        return;
+      }
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        window.speechSynthesis.removeEventListener('voiceschanged', done);
+        resolve(window.speechSynthesis.getVoices() || []);
+      };
+      window.speechSynthesis.addEventListener('voiceschanged', done);
+      setTimeout(done, 450);
+    });
+  }
+
   /**
    * Free fallback TTS via Web Speech API.
    */
-  speakBrowserFallback(id, text, langCode) {
-    return new Promise((resolve) => {
-      if (!('speechSynthesis' in window)) {
-        resolve();
-        return;
-      }
-      this.stopPlayback();
+  async speakBrowserFallback(id, text, langCode) {
+    if (!('speechSynthesis' in window)) return;
+    this.stopPlayback();
 
-      const langMap = {
-        zh: 'zh-TW',
-        en: 'en-US',
-        ja: 'ja-JP',
-        sv: 'sv-SE',
-      };
-      const targetLang = langMap[langCode] || langCode || 'zh-TW';
+    const langMap = {
+      zh: 'zh-TW',
+      en: 'en-US',
+      ja: 'ja-JP',
+      sv: 'sv-SE',
+    };
+    const targetLang = langMap[langCode] || langCode || 'zh-TW';
+    const voices = await this._loadBrowserVoices();
+
+    return new Promise((resolve) => {
       const utter = new SpeechSynthesisUtterance(text);
       utter.lang = targetLang;
       utter.rate = 1.0;
 
-      const voices = window.speechSynthesis.getVoices();
-      const matched = voices.find((v) => v.lang.toLowerCase().startsWith(targetLang.toLowerCase().slice(0, 2)));
-      if (matched) utter.voice = matched;
+      const prefix = targetLang.toLowerCase().slice(0, 2);
+      const exact = voices.find((v) => v.lang.toLowerCase() === targetLang.toLowerCase());
+      const loose = voices.find((v) => v.lang.toLowerCase().startsWith(prefix));
+      if (exact || loose) utter.voice = exact || loose;
 
       this.muted = true;
       this.playingId = id || '__speech__';

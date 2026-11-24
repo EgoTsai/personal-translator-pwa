@@ -1,4 +1,4 @@
-const CACHE_NAME = 'personal-translator-v2';
+const CACHE_NAME = 'personal-translator-v3';
 const APP_SHELL = [
   './',
   './index.html',

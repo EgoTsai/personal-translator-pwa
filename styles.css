@@ -686,8 +686,57 @@ button {
   font-size: 16.5px;
   font-weight: 600;
   color: var(--ink);
-  line-height: 1.55;
+  line-height: 1.6;
   word-break: break-word;
+}
+
+.inline-speak-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  margin-left: 8px;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  transition: background 0.15s ease, transform 0.1s ease, color 0.15s ease;
+}
+
+.inline-speak-btn:hover, .inline-speak-btn:active {
+  background: var(--accent);
+  color: var(--accent-ink);
+  transform: scale(0.95);
+}
+
+.inline-speak-btn.playing {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.inline-speak-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.inline-speak-btn.subtle {
+  width: 24px;
+  height: 24px;
+  margin-left: 6px;
+  background: var(--bg-subtle);
+  color: var(--ink-secondary);
+}
+
+.inline-speak-btn.subtle:hover,
+.inline-speak-btn.subtle.playing {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.inline-speak-btn.subtle svg {
+  width: 13px;
+  height: 13px;
 }
 
 .utterance-reading {
@@ -703,7 +752,7 @@ button {
   border-top: 1px dashed var(--border);
   font-size: 13px;
   color: var(--ink-secondary);
-  line-height: 1.45;
+  line-height: 1.5;
   word-break: break-word;
 }
 

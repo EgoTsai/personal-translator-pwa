@@ -320,23 +320,6 @@ function createMessageCard(msg) {
   const actions = document.createElement('div');
   actions.className = 'utterance-actions';
 
-  // Speak Button (🔊)
-  const speakBtn = document.createElement('button');
-  speakBtn.type = 'button';
-  speakBtn.className = `mini-btn${isPlaying ? ' playing' : ''}`;
-  speakBtn.title = isPlaying ? '停止播放' : 'AI 真人唸出這一句';
-  speakBtn.setAttribute('aria-label', speakBtn.title);
-  speakBtn.innerHTML = isPlaying
-    ? `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>`
-    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
-  speakBtn.addEventListener('click', () => {
-    if (audio.playingId === msg.id) {
-      audio.stopPlayback();
-    } else {
-      speakMessage(msg, speakText, speakLang);
-    }
-  });
-
   // Fullscreen Show Card Button
   const expandBtn = document.createElement('button');
   expandBtn.type = 'button';
@@ -362,13 +345,37 @@ function createMessageCard(msg) {
     }
   });
 
-  actions.append(speakBtn, expandBtn, copyBtn);
+  actions.append(expandBtn, copyBtn);
   top.append(spGroup, actions);
   card.appendChild(top);
 
+  const makeInlineSpeakBtn = (cacheId, textToSpeak, langCode, subtle = false) => {
+    const playing = audio.playingId === cacheId;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `inline-speak-btn${subtle ? ' subtle' : ''}${playing ? ' playing' : ''}`;
+    btn.title = playing ? '停止播放' : '朗讀這一句';
+    btn.setAttribute('aria-label', btn.title);
+    btn.innerHTML = playing
+      ? `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>`
+      : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
+    btn.addEventListener('click', () => {
+      if (audio.playingId === cacheId) {
+        audio.stopPlayback();
+      } else {
+        speakMessage(cacheId, textToSpeak, langCode);
+      }
+    });
+    return btn;
+  };
+
+  // Main text with inline speak icon directly after the sentence
   const mainEl = document.createElement('div');
   mainEl.className = 'utterance-main';
-  mainEl.textContent = mainText;
+  mainEl.append(
+    document.createTextNode(mainText),
+    makeInlineSpeakBtn(msg.id, speakText, speakLang, false)
+  );
   card.appendChild(mainEl);
 
   if (isOutbound && msg.reading) {
@@ -386,7 +393,10 @@ function createMessageCard(msg) {
   } else if (!isOutbound && !msg.isChinese && msg.original && msg.original !== msg.zh) {
     const subEl = document.createElement('div');
     subEl.className = 'utterance-sub foreign-orig';
-    subEl.textContent = msg.original;
+    subEl.append(
+      document.createTextNode(msg.original),
+      makeInlineSpeakBtn(`${msg.id}_orig`, msg.original, msg.lang, true)
+    );
     card.appendChild(subEl);
   }
 
@@ -407,12 +417,13 @@ function renameSpeaker(speakerCode) {
 }
 
 // TTS Playback
-async function speakMessage(msg, text, langCode) {
+async function speakMessage(msgOrId, text, langCode) {
+  const cacheId = typeof msgOrId === 'string' ? msgOrId : msgOrId?.id;
   if (!text) return;
   try {
     await audio.ensureContext();
-    if (audio.hasCachedAudio(msg.id)) {
-      await audio.playCachedAudio(msg.id);
+    if (audio.hasCachedAudio(cacheId)) {
+      await audio.playCachedAudio(cacheId);
       return;
     }
 
@@ -427,17 +438,17 @@ async function speakMessage(msg, text, langCode) {
         text,
         langCode,
       });
-      await audio.playGeminiAudio(msg.id, base64, mimeType);
+      await audio.playGeminiAudio(cacheId, base64, mimeType);
     } else {
       if (settings.ttsModel !== 'browser' && !settings.apiKey) {
         showToast('未設定 API Key，暫用手機內建語音示範');
       }
-      await audio.speakBrowserFallback(msg.id, text, langCode);
+      await audio.speakBrowserFallback(cacheId, text, langCode);
     }
   } catch (err) {
     console.error('TTS error:', err);
     showToast(`AI 語音失敗，改用瀏覽器語音：${err.message}`, 3200);
-    await audio.speakBrowserFallback(msg.id, text, langCode);
+    await audio.speakBrowserFallback(cacheId, text, langCode);
   }
 }
 
@@ -717,6 +728,9 @@ function closeSettings() {
 }
 
 function saveSettingsFromForm() {
+  const prevTts = settings.ttsModel;
+  const prevVoice = settings.voiceName;
+
   settings.apiKey = els.apiKeyInput.value.trim();
   settings.model = els.modelSelect.value;
   settings.ttsModel = els.ttsModelSelect.value;
@@ -725,6 +739,10 @@ function saveSettingsFromForm() {
   settings.silenceMs = Number(els.silenceSelect.value);
   settings.vadThreshold = Number(els.vadThresholdSelect.value);
   settings.showOriginal = els.showOriginalCheck.checked;
+
+  if (prevTts !== settings.ttsModel || prevVoice !== settings.voiceName) {
+    audio.clearTtsCache();
+  }
 
   audio.configureVad({
     threshold: settings.vadThreshold,

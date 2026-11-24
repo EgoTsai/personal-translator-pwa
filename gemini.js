@@ -376,13 +376,12 @@ export async function synthesizeGeminiSpeech({
   langCode = 'zh',
   signal,
 }) {
-  const langLabelMap = {
-    zh: 'Traditional Chinese (Taiwan Mandarin)',
-    en: 'natural English',
-    ja: 'natural Japanese',
-    sv: 'natural Swedish',
-  };
-  const langDesc = langLabelMap[langCode] || 'its original language';
+  // Gemini 3.8 TTS treats `text` strictly as a verbatim transcript and auto-detects language.
+  // Never wrap it in English instructions or the model will read those instructions aloud!
+  const cleanText = String(text || '').trim();
+  if (!cleanText) {
+    throw new Error('沒有可朗讀的文字內容');
+  }
 
   const payload = {
     contents: [
@@ -390,7 +389,7 @@ export async function synthesizeGeminiSpeech({
         role: 'user',
         parts: [
           {
-            text: `Speak the following text clearly and naturally in ${langDesc}. Read ONLY the exact text below without adding any extra words or commentary:\n\n${text}`,
+            text: cleanText,
           },
         ],
       },
@@ -417,7 +416,7 @@ export async function synthesizeGeminiSpeech({
 
   return {
     base64: audioPart.inlineData.data,
-    mimeType: audioPart.inlineData.mimeType || 'audio/L16;codec=pcm;rate=24000',
+    mimeType: audioPart.inlineData.mimeType || 'audio/wav',
   };
 }
 
