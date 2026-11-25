@@ -1543,7 +1543,7 @@ button {
   gap: 8px;
 }
 
-.text-control, .select-control {
+.text-control, .select-control, .textarea-control {
   width: 100%;
   height: 42px;
   padding: 0 12px;
@@ -1555,7 +1555,16 @@ button {
   outline: none;
 }
 
-.text-control:focus, .select-control:focus {
+.textarea-control {
+  height: auto;
+  min-height: 68px;
+  padding: 9px 12px;
+  line-height: 1.45;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.text-control:focus, .select-control:focus, .textarea-control:focus {
   border-color: var(--accent);
 }
 

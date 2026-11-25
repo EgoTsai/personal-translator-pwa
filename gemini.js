@@ -40,6 +40,22 @@ export const TONE_PRESETS = {
   casual: '輕鬆親切、像朋友間聊天一樣自然口語',
 };
 
+const TONE_PRESETS_EN = {
+  natural: 'natural, idiomatic everyday speech',
+  polite: 'polite and respectful (business/strangers; Japanese teineigo/keigo)',
+  casual: 'relaxed, friendly casual speech',
+};
+
+export function formatGlossaryLine(glossary) {
+  const clean = String(glossary || '')
+    .replace(/[\r\n]+/g, ', ')
+    .replace(/\s+/g, ' ')
+    .replace(/,\s*,+/g, ', ')
+    .trim();
+  if (!clean) return '';
+  return `Glossary (use exact terms): ${clean.slice(0, 260)}`;
+}
+
 export const ICEBREAKER_BANNERS = {
   en: 'AI Translator · Please feel free to speak',
   ja: 'AI通訳中です・どうぞお話しください',
@@ -370,6 +386,7 @@ export async function interpretDialogueAudio({
   mimeType = 'audio/wav',
   targetLang = 'en',
   tone = 'natural',
+  glossary = '',
   speakerMemory = {},
   recentContext = [],
   contextLimit = 4,
@@ -377,11 +394,12 @@ export async function interpretDialogueAudio({
   signal,
 }) {
   const langInfo = TARGET_LANGUAGES[targetLang] || TARGET_LANGUAGES.en;
-  const toneDesc = TONE_PRESETS[tone] || TONE_PRESETS.natural;
+  const toneDescEn = TONE_PRESETS_EN[tone] || TONE_PRESETS_EN.natural;
+  const glossaryLine = formatGlossaryLine(glossary);
 
   const speakerLines = Object.entries(speakerMemory)
     .slice(0, 6)
-    .map(([id, info]) => `- ${id}${info.customName ? `（${info.customName}）` : ''}：${info.voiceHint || '說話者'}`)
+    .map(([id, info]) => `- ${id}${info.customName ? ` (${info.customName})` : ''}: ${info.voiceHint || 'speaker'}`)
     .join('\n');
 
   const limit = Math.max(0, Number(contextLimit) || 4);
@@ -398,30 +416,24 @@ export async function interpretDialogueAudio({
           .join('\n')
       : '';
 
-  const systemInstruction = `你是使用者的即時雙向口譯官（自動對話模式）。使用者母語為繁體中文（台灣用語），對話對象使用「${langInfo.label}（${langInfo.nativeName}）」或其他外語。
-
-請嚴格遵守以下雙向翻譯規則：
-1. **自動雙向判斷（最重要！）**：
-   - 聽到**非中文**（英語、日語、瑞典語或任何其他外語）：
-     - \`direction\` 設為 \`"inbound"\`
-     - \`speaker\` 依聲紋與問答輪替標註 \`A\`、\`B\`、\`C\`、\`D\`（不同聲音或回應方請給不同代號）
-     - \`source_lang\` 填入 ISO 639-1 語言碼（如 \`en\`、\`ja\`、\`sv\`），\`target_lang\` 設為 \`"zh"\`
-     - \`original_text\` 填外語正確逐字稿；\`translated_text\` **必須翻譯成自然流暢的繁體中文（台灣慣用語）**，不可留外語！
-     - \`reading\` 留空字串 \`""\`。
-   - 聽到**中文**（國語／台灣華語／普通話）：
-     - \`direction\` 設為 \`"outbound"\`
-     - \`speaker\` 固定為 \`"我"\`
-     - \`source_lang\` 設為 \`"zh"\`，\`target_lang\` 設為 \`"${langInfo.code}"\`
-     - \`original_text\` 填繁體中文原話；\`translated_text\` 翻譯成自然道地的「${langInfo.label}（${langInfo.nativeName}）」，語氣：${toneDesc}。
-     - \`reading\`：僅當目標語為日語（\`ja\`）時提供假名與羅馬拼音；瑞典語（\`sv\`）必要時提供簡短重音提示；其餘留空字串 \`""\`。
-2. 若同段音訊有多人輪流說話，請依時間順序拆分為多筆 \`utterances\`。
-3. 若只有背景雜音、空白、咳嗽或無有效語音，回傳 \`{"utterances": []}\`，勿捏造內容。
-4. 只輸出符合 schema 的 JSON。`;
+  const systemInstruction = `Real-time bidirectional interpreter for a Taiwan Traditional Chinese (zh-TW) user speaking with ${langInfo.nativeName} or other language speakers.
+Rules:
+1. Non-Chinese speech -> direction:"inbound", speaker:"A"/"B"/"C"/"D" (consistent by voice/turn), source_lang:ISO-639-1, target_lang:"zh", original_text:accurate verbatim transcript, translated_text:natural fluent Taiwan zh-TW (NEVER leave foreign text or Japanese Kana), reading:"".
+2. Chinese speech -> direction:"outbound", speaker:"我", source_lang:"zh", target_lang:"${langInfo.code}", original_text:zh-TW verbatim, translated_text:natural native ${langInfo.nativeName} (tone: ${toneDescEn}), reading:${
+    langInfo.code === 'ja'
+      ? 'Hiragana/Katakana + Romaji'
+      : langInfo.code === 'sv'
+        ? 'brief stress hint if helpful, else ""'
+        : '""'
+  }.
+3. Split multiple speakers chronologically into separate utterances.
+4. Silence, music, coughing, or unintelligible noise -> {"utterances":[]}. Output strict JSON only.`;
 
   const promptText = [
-    speakerLines ? `【已知說話者】\n${speakerLines}` : '',
-    contextLines ? `【近期上下文】\n${contextLines}` : '',
-    `分析音訊並雙向口譯：外語→繁體中文；中文→${langInfo.label}。`,
+    glossaryLine,
+    speakerLines ? `Speakers:\n${speakerLines}` : '',
+    contextLines ? `Context:\n${contextLines}` : '',
+    `Interpret audio: non-Chinese -> zh-TW; Chinese -> ${langInfo.nativeName}.`,
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -458,35 +470,35 @@ export async function interpretDialogueAudio({
               properties: {
                 direction: {
                   type: 'STRING',
-                  description: '外語翻中文為 inbound；中文翻外語為 outbound',
+                  description: 'inbound (non-Chinese -> zh-TW) or outbound (Chinese -> target)',
                 },
                 speaker: {
                   type: 'STRING',
-                  description: 'inbound 填 A/B/C/D；outbound 固定填 我',
+                  description: 'A/B/C/D for inbound; 我 for outbound',
                 },
                 voice_hint: {
                   type: 'STRING',
-                  description: 'inbound 簡述音色語言（如 男聲・英語）；outbound 留空',
+                  description: 'Brief voice/lang tag for inbound (e.g. 男聲・英語); empty for outbound',
                 },
                 source_lang: {
                   type: 'STRING',
-                  description: '原話 ISO 639-1 語言碼，如 en, ja, sv, zh',
+                  description: 'ISO 639-1 code (en, ja, sv, zh)',
                 },
                 target_lang: {
                   type: 'STRING',
-                  description: `譯文語言碼：inbound 為 zh，outbound 為 ${langInfo.code}`,
+                  description: `zh for inbound, ${langInfo.code} for outbound`,
                 },
                 original_text: {
                   type: 'STRING',
-                  description: '原話精準逐字稿',
+                  description: 'Verbatim source transcript',
                 },
                 translated_text: {
                   type: 'STRING',
-                  description: '自然道地譯文（inbound 必為繁體中文；outbound 必為目標外語）',
+                  description: 'Natural translation (zh-TW for inbound; target language for outbound)',
                 },
                 reading: {
                   type: 'STRING',
-                  description: '日語假名/羅馬音或瑞典語簡短重音提示；其餘留空',
+                  description: 'Japanese Kana+Romaji or brief Swedish stress hint; else empty',
                 },
               },
               required: [
@@ -607,12 +619,103 @@ export async function interpretDialogueAudio({
   return normalized;
 }
 
+const BROADCAST_REVISE_MARKER = '<<<REVISE>>>';
+const BROADCAST_REVISE_RE = /\r?\n?\s*<<<\s*REVISE\s*>>>\s*\r?\n?/i;
+
+/**
+ * Incrementally extract clean Traditional Chinese preview from first-token-first Broadcast SSE stream,
+ * suppressing control tags ([P], [SILENT]) and any partial trailing `<<<REVISE>>>` delimiter.
+ */
+export function extractBroadcastStreamPreview(raw) {
+  const trimmedStart = String(raw || '').replace(/^\s+/, '');
+  if (!trimmedStart) return { currentZh: '', revising: false };
+
+  let body = trimmedStart;
+  if (body.startsWith('[')) {
+    const closeIdx = body.indexOf(']');
+    if (closeIdx === -1) {
+      if (body.length < 10) return { currentZh: '', revising: false };
+    } else if (closeIdx <= 10) {
+      const tag = body.slice(0, closeIdx + 1).toUpperCase();
+      if (tag === '[SILENT]') return { currentZh: '', revising: false };
+      if (tag === '[P]') {
+        body = body.slice(closeIdx + 1).replace(/^\s+/, '');
+      }
+    }
+  }
+
+  const fullMatch = BROADCAST_REVISE_RE.exec(body);
+  if (fullMatch) {
+    return {
+      currentZh: body.slice(0, fullMatch.index).trim(),
+      revising: true,
+    };
+  }
+
+  // Strip any partial trailing prefix of `<<<REVISE>>>` so raw delimiter characters never flicker on screen
+  const maxSuffix = Math.min(body.length, BROADCAST_REVISE_MARKER.length - 1);
+  for (let len = maxSuffix; len >= 1; len--) {
+    const suffix = body.slice(body.length - len);
+    if (BROADCAST_REVISE_MARKER.startsWith(suffix.toUpperCase())) {
+      return {
+        currentZh: body.slice(0, body.length - len).trim(),
+        revising: len >= 3,
+      };
+    }
+  }
+
+  return { currentZh: body.trim(), revising: false };
+}
+
+/**
+ * Parse completed first-token-first plain-text response from `interpretBroadcastAudio`.
+ */
+export function parseBroadcastStreamResponse(raw) {
+  let cleaned = String(raw || '').trim();
+  if (!cleaned) return null;
+
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:\w+)?\s*/i, '').replace(/\s*```$/, '').trim();
+  }
+  if (!cleaned || /^\[SILENT\]$/i.test(cleaned)) return null;
+
+  // Defensive fallback if model ever returns legacy JSON structure
+  if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
+    try {
+      const j = safeJsonParse(cleaned);
+      if (j && (typeof j.current_zh === 'string' || typeof j.revised_prev === 'string')) {
+        const currentZh = String(j.current_zh || '').trim();
+        const revisedPrev = String(j.revised_prev || '').trim();
+        if (!currentZh && !revisedPrev) return null;
+        return { currentZh, revisedPrev, newParagraph: Boolean(j.new_paragraph) };
+      }
+    } catch (_) {}
+  }
+
+  let newParagraph = false;
+  if (/^\[P\]/i.test(cleaned)) {
+    newParagraph = true;
+    cleaned = cleaned.replace(/^\[P\]\s*/i, '').trim();
+  }
+  if (!cleaned || /^\[SILENT\]$/i.test(cleaned)) return null;
+
+  const match = BROADCAST_REVISE_RE.exec(cleaned);
+  if (match) {
+    const currentZh = cleaned.slice(0, match.index).trim();
+    const revisedPrev = cleaned.slice(match.index + match[0].length).trim();
+    const safeCurrent = /^\[SILENT\]$/i.test(currentZh) ? '' : currentZh;
+    const safeRevised = /^\[SILENT\]$/i.test(revisedPrev) ? '' : revisedPrev;
+    if (!safeCurrent && !safeRevised) return null;
+    return { currentZh: safeCurrent, revisedPrev: safeRevised, newParagraph };
+  }
+
+  return { currentZh: cleaned, revisedPrev: '', newParagraph };
+}
+
 /**
  * Scenario 2 (Primary): Continuous Chinese-Only Broadcast Interpreter ("聆聽翻譯" 連續純中文＋回頭潤飾)
- * - Outputs ONLY natural Traditional Chinese (no foreign transcript -> ~50% fewer output tokens & 2x faster TTFT!)
- * - Single-pass rolling semantic self-correction: receives `prevTailText` so when the next audio chunk clarifies
- *   clause order (SVO/SOV inversion), cut sentences, pronouns, or proper nouns, it returns `revised_prev` in the
- *   exact same API call (zero extra API cost in Standard mode!).
+ * - First-token-first plain-text streaming protocol: Token #1 is immediately the first Chinese character on screen!
+ * - Zero JSON wrapper overhead and optional trailing `<<<REVISE>>>` single-pass retroactive self-correction.
  */
 export async function interpretBroadcastAudio({
   apiKey,
@@ -620,6 +723,7 @@ export async function interpretBroadcastAudio({
   wavBase64,
   mimeType = 'audio/wav',
   preferredLang = 'en',
+  glossary = '',
   prevTailText = '',
   priorContext = '',
   onStream = null,
@@ -628,34 +732,27 @@ export async function interpretBroadcastAudio({
   const langInfo = TARGET_LANGUAGES[preferredLang] || TARGET_LANGUAGES.en;
   const cleanPrev = String(prevTailText || '').trim();
   const cleanPrior = String(priorContext || '').trim();
+  const glossaryLine = formatGlossaryLine(glossary);
 
-  const systemInstruction = `你是頂尖同步口譯與新聞即時翻譯專家。使用者正在連續收聽外語新聞、Podcast、影片或演講（主要可能為${langInfo.label}／英／日／瑞典或其他外語），畫面上**只需要流暢連貫的繁體中文（台灣慣用語）**，不要輸出外語原文。
-
-請嚴格遵守以下規則：
-1. **極速直譯為自然繁體中文**：
-   - 聽到外語時，直接翻成流暢、好讀、像台灣新聞或專業字幕的繁體中文，絕不可夾雜整句外語原文或日文假名（專有名詞縮寫如 AI、GDP、NATO 除外）。
-   - 若聽到中文，直接保留自然繁體中文原話。
-2. **回頭修正前段語意（極重要！）**：
-   - 若下方有提供【前段尾端譯文】，代表那是剛翻完的上一小段（可能剛好切在句子中間，或因英／日文語序倒裝導致當時翻得不夠通順）。
-   - 聽完這段新音訊後，若你發現新語境讓前段可以變得更通順、更精準（例如修正倒裝語序、補齊被切斷的後半句、修正專有名詞或人稱代名詞），請在 \`revised_prev\` 輸出**潤飾修改後的完整前段繁體中文**，並在 \`current_zh\` 只輸出緊接其後的剩餘新譯文（兩者直接拼在一起就是完全通順的文章，**不可重複也不可漏譯**）。
-   - 若【前段尾端譯文】已經完整通順不需修改，請將 \`revised_prev\` 設為空字串 \`""\`，只在 \`current_zh\` 輸出這段新音訊的繁體中文。
-   - 若這段新音訊開頭因無縫收音與前段最後 1–2 個字重疊，請自然銜接、不要重複翻譯。
-3. **智慧分段（\`new_paragraph\`）**：
-   - 若明顯切換新新聞主題、新講者長段發言或話題轉折，\`new_paragraph\` 設為 \`true\`；若是同一主題的延續，設為 \`false\`，讓中文自然連成流暢段落。
-4. **過濾雜訊**：
-   - 若音訊只有音樂、空白、雜音或無有效語音，回傳 \`{"revised_prev":"","current_zh":"","new_paragraph":false}\`，勿捏造。
-5. 只輸出符合 schema 的 JSON。`;
+  const systemInstruction = `Simultaneous broadcast interpreter. Translate audio (primarily ${langInfo.nativeName} or any language) directly into fluent, natural Taiwan Traditional Chinese (zh-TW) like professional news subtitles. Never output foreign sentences or Japanese Kana (keep standard acronyms like AI, GDP, NATO). Keep Chinese speech verbatim in zh-TW.
+Output plain text ONLY (NO JSON, NO markdown):
+- Silence, music, or noise only -> output exactly: [SILENT]
+- Prefix with [P] ONLY on a clear new topic or news segment shift.
+- Stream the new zh-TW translation immediately. Seamlessly skip any 1-2 word audio overlap from PREV.
+- ONLY IF PREV was provided and the new audio clearly clarifies or improves PREV (fixing SVO/SOV clause order, cut endings, pronouns, or proper nouns), append a newline, then <<<REVISE>>>, then a newline, then the complete improved zh-TW for PREV so PREV + new text read smoothly with zero duplication or omission.
+- If PREV already reads smoothly, STOP right after the new translation (omit <<<REVISE>>>).`;
 
   const promptParts = [];
+  if (glossaryLine) {
+    promptParts.push(glossaryLine);
+  }
   if (cleanPrior) {
-    promptParts.push(`【更早的前文脈絡（唯讀參考，保持專有名詞一致）】\n${cleanPrior}`);
+    promptParts.push(`PRIOR (read-only context for consistency):\n${cleanPrior}`);
   }
   if (cleanPrev) {
-    promptParts.push(
-      `【前段尾端譯文（若新音訊讓語意更清楚或原本語序不順，可在 revised_prev 回頭修改這段）】\n${cleanPrev}`
-    );
+    promptParts.push(`PREV (append <<<REVISE>>> only if new audio improves it):\n${cleanPrev}`);
   }
-  promptParts.push('請聆聽新音訊，以最流暢的繁體中文接續翻譯（必要時透過 revised_prev 回頭潤飾前段），輸出 JSON。');
+  promptParts.push('Translate the new audio into continuous Taiwan zh-TW.');
 
   const payload = {
     systemInstruction: {
@@ -678,25 +775,6 @@ export async function interpretBroadcastAudio({
     generationConfig: {
       temperature: 0.15,
       ...buildThinkingConfig(model),
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: 'OBJECT',
-        properties: {
-          revised_prev: {
-            type: 'STRING',
-            description: '若需要回頭修改潤飾「前段尾端譯文」，填入完整修正後的繁體中文；不需修改則留空字串 ""',
-          },
-          current_zh: {
-            type: 'STRING',
-            description: '新音訊接續的流暢繁體中文譯文（絕不留外語原文，不可與 revised_prev 重複）',
-          },
-          new_paragraph: {
-            type: 'BOOLEAN',
-            description: '是否換新主題段落',
-          },
-        },
-        required: ['revised_prev', 'current_zh', 'new_paragraph'],
-      },
     },
   };
 
@@ -707,24 +785,23 @@ export async function interpretBroadcastAudio({
     onPartialText:
       typeof onStream === 'function'
         ? (partial) => {
-            const revisedPrev = extractPartialJsonStringField(partial, 'revised_prev');
-            const currentZh = extractPartialJsonStringField(partial, 'current_zh');
-            if (revisedPrev || currentZh) {
-              onStream({ revisedPrev, currentZh });
+            const preview = extractBroadcastStreamPreview(partial);
+            if (preview.currentZh || preview.revising) {
+              onStream(preview);
             }
           }
         : null,
     signal,
   });
 
-  const parsed = safeJsonParse(raw);
+  const parsed = parseBroadcastStreamResponse(raw);
   if (!parsed) return null;
 
-  let revisedPrev = cleanPrev ? String(parsed.revised_prev || '').trim() : '';
-  let currentZh = String(parsed.current_zh || '').trim();
-  const newParagraph = Boolean(parsed.new_paragraph);
+  let revisedPrev = cleanPrev ? String(parsed.revisedPrev || '').trim() : '';
+  let currentZh = String(parsed.currentZh || '').trim();
+  const newParagraph = Boolean(parsed.newParagraph);
 
-  // Guardrail: reject malformed or untranslated revised_prev so we never corrupt prior good Chinese
+  // Guardrail: reject malformed or untranslated revisedPrev so we never corrupt prior good Chinese
   if (revisedPrev) {
     const tooShort = cleanPrev.length >= 16 && revisedPrev.length < Math.floor(cleanPrev.length * 0.4);
     if (revisedPrev === cleanPrev || tooShort || looksUntranslatedForZh(revisedPrev, '', preferredLang)) {
@@ -732,7 +809,7 @@ export async function interpretBroadcastAudio({
     }
   }
 
-  // Guardrail: rescue if raw foreign text accidentally leaked into current_zh
+  // Guardrail: rescue if raw foreign text accidentally leaked into currentZh
   if (currentZh && looksUntranslatedForZh(currentZh, '', preferredLang)) {
     try {
       const rescued = await rescueTranslateToZhTW({
@@ -762,6 +839,7 @@ export async function interpretBroadcastAudio({
 export async function polishBroadcastText({
   apiKey,
   model,
+  glossary = '',
   priorContext = '',
   draftText,
   signal,
@@ -769,11 +847,13 @@ export async function polishBroadcastText({
   const cleanDraft = String(draftText || '').trim();
   if (!cleanDraft || cleanDraft.length < 8) return null;
   const cleanPrior = String(priorContext || '').trim();
+  const glossaryLine = formatGlossaryLine(glossary);
 
   const prompt = [
-    cleanPrior ? `【前文脈絡（唯讀參考，勿輸出）】\n${cleanPrior}` : '',
-    `【待潤飾的連續即時譯文草稿】\n${cleanDraft}`,
-    '請將上方草稿潤飾成完全通順、自然道地的台灣繁體中文：修正因分段收音造成的斷裂、語序倒裝、人稱／專有名詞不一致與重複字詞。**務必完整保留原本所有資訊與事實細節，絕對不可摘要或刪減內容**。只輸出 JSON。',
+    glossaryLine,
+    cleanPrior ? `PRIOR (read-only context, do NOT output):\n${cleanPrior}` : '',
+    `DRAFT:\n${cleanDraft}`,
+    'Polish DRAFT into completely smooth, idiomatic Taiwan Traditional Chinese (zh-TW): fix chunk breaks, inverted clause order, inconsistent pronouns/proper nouns, and repeated words. Preserve ALL original facts and details (never summarize or omit). Return strict JSON.',
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -789,7 +869,7 @@ export async function polishBroadcastText({
         properties: {
           polished_zh: {
             type: 'STRING',
-            description: '潤飾後完整流暢的台灣繁體中文（保留所有原始資訊）',
+            description: 'Smooth complete Taiwan zh-TW preserving all original facts',
           },
         },
         required: ['polished_zh'],
@@ -1030,6 +1110,7 @@ export async function translateOutboundChinese({
   model,
   targetLang = 'en',
   tone = 'natural',
+  glossary = '',
   wavBase64 = null,
   mimeType = 'audio/wav',
   textInput = null,
@@ -1039,7 +1120,8 @@ export async function translateOutboundChinese({
   signal,
 }) {
   const langInfo = TARGET_LANGUAGES[targetLang] || TARGET_LANGUAGES.en;
-  const toneDesc = TONE_PRESETS[tone] || TONE_PRESETS.natural;
+  const toneDescEn = TONE_PRESETS_EN[tone] || TONE_PRESETS_EN.natural;
+  const glossaryLine = formatGlossaryLine(glossary);
 
   const limit = Math.max(0, Number(contextLimit) || 5);
   const contextLines =
@@ -1050,17 +1132,12 @@ export async function translateOutboundChinese({
           .join('\n')
       : '';
 
-  const systemInstruction = `你是使用者的專屬隨身雙向口譯官。請自動偵測使用者輸入（文字或語音）的語言，並遵守以下雙向翻譯規則：
-
-1. **自動語言判斷與翻譯方向**：
-   - 若輸入是**中文**（繁體／簡體／台灣華語）：設 \`source_lang\` 為 \`"zh"\`、\`target_lang\` 為 \`"${langInfo.code}"\`，將其自然地道地翻譯成「${langInfo.label}（${langInfo.nativeName}）」，語氣風格：${toneDesc}。
-   - 若輸入是**非中文**（英語、日語、瑞典語或任何其他外語）：設 \`source_lang\` 為該語言的 ISO 639-1 代碼（如 \`"en"\`、\`"ja"\`、\`"sv"\`），設 \`target_lang\` 為 \`"zh"\`，將其翻譯成自然流暢的**繁體中文（台灣慣用語）**。
-2. \`source_text\`：
-   - 若輸入為文字，填入使用者原始文字；若輸入為音訊，先精準轉寫原話。若音訊無有效語音則讓 \`source_text\` 與 \`translated\` 皆為空字串。
-3. \`reading\` 欄位：
-   - 僅當 \`target_lang\` 為日語（\`ja\`）時，提供假名與羅馬拼音（例如：おげんきですか (Ogenki desu ka)）。
-   - 當 \`target_lang\` 為瑞典語（\`sv\`）且有必要時，提供簡短重音提示；其餘情況（包含翻成中文或英語）留空字串即可。
-4. 譯文必須自然像母語者說的話，不要生硬直譯。只輸出符合 schema 的 JSON。`;
+  const systemInstruction = `Personal bidirectional interpreter. Auto-detect input language (text or audio):
+1. Chinese input -> source_lang:"zh", target_lang:"${langInfo.code}", translated:natural idiomatic ${langInfo.nativeName} (tone: ${toneDescEn}).
+2. Non-Chinese input -> source_lang:ISO-639-1, target_lang:"zh", translated:natural fluent Taiwan Traditional Chinese (zh-TW).
+3. source_text: exact input text or accurate audio transcript. If audio has no intelligible speech, leave source_text and translated empty.
+4. reading: ONLY when target_lang is "ja" provide Kana + Romaji (e.g. おげんきですか (Ogenki desu ka)); for "sv" provide brief stress hint if helpful; else "".
+Output strict JSON only.`;
 
   const parts = [];
   if (wavBase64) {
@@ -1073,10 +1150,11 @@ export async function translateOutboundChinese({
   }
 
   const promptText = [
-    contextLines ? `【目前對話上下文（幫助代名詞與語氣銜接）】\n${contextLines}` : '',
+    glossaryLine,
+    contextLines ? `Context:\n${contextLines}` : '',
     textInput
-      ? `【使用者輸入文字】\n${textInput}\n\n請自動判斷語言：若是中文請翻成 ${langInfo.label}（${langInfo.nativeName}）；若是非中文請翻成繁體中文。`
-      : `請聽這段語音並自動判斷語言：若是中文請翻成 ${langInfo.label}（${langInfo.nativeName}）；若是非中文請翻成繁體中文。`,
+      ? `Input:\n${textInput}\n\nAuto-translate: Chinese -> ${langInfo.nativeName}; non-Chinese -> zh-TW.`
+      : `Transcribe and auto-translate audio: Chinese -> ${langInfo.nativeName}; non-Chinese -> zh-TW.`,
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -1102,23 +1180,23 @@ export async function translateOutboundChinese({
         properties: {
           source_lang: {
             type: 'STRING',
-            description: '偵測到的輸入語言 ISO 639-1 代碼，例如 zh, en, ja, sv',
+            description: 'Detected ISO 639-1 code (zh, en, ja, sv)',
           },
           target_lang: {
             type: 'STRING',
-            description: `輸出譯文語言代碼：輸入為中文時為 ${langInfo.code}，輸入為非中文時為 zh`,
+            description: `${langInfo.code} if Chinese input; zh if non-Chinese input`,
           },
           source_text: {
             type: 'STRING',
-            description: '原始輸入文字或語音轉寫稿',
+            description: 'Original text or audio transcript',
           },
           translated: {
             type: 'STRING',
-            description: '自然道地的譯文',
+            description: 'Natural idiomatic translation',
           },
           reading: {
             type: 'STRING',
-            description: '日語假名/羅馬音或瑞典語簡短重音提示；其餘留空',
+            description: 'Japanese Kana+Romaji or brief Swedish stress hint; else empty',
           },
         },
         required: ['source_lang', 'target_lang', 'source_text', 'translated', 'reading'],

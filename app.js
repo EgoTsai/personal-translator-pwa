@@ -2,7 +2,7 @@
  * app.js — Main UI controller for 隨身口譯官 PWA
  */
 
-import { AudioEngine } from './audio.js?v=2.7';
+import { AudioEngine } from './audio.js?v=2.8';
 import {
   TARGET_LANGUAGES,
   ICEBREAKER_BANNERS,
@@ -13,14 +13,15 @@ import {
   translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
-} from './gemini.js?v=2.7';
-import { GeminiLiveClient } from './live.js?v=2.7';
+} from './gemini.js?v=2.8';
+import { GeminiLiveClient } from './live.js?v=2.8';
 
 const STORAGE_KEYS = {
   settings: 'pt_settings_v1',
   messages: 'pt_messages_v1',
   speakers: 'pt_speakers_v1',
   broadcast: 'pt_broadcast_v1',
+  phraseCache: 'pt_phrase_cache_v1',
 };
 
 const DEFAULT_SETTINGS = {
@@ -31,6 +32,7 @@ const DEFAULT_SETTINGS = {
   ttsModel: 'gemini-3.8-flash-lite-tts',
   voiceName: 'Kore',
   tone: 'natural',
+  glossary: '',
   silenceMs: 750,
   vadThreshold: 0.018,
   showOriginal: true,
@@ -297,6 +299,7 @@ const els = {
   voiceSelect: $('voiceSelect'),
   testVoiceBtn: $('testVoiceBtn'),
   toneSelect: $('toneSelect'),
+  glossaryInput: $('glossaryInput'),
   silenceSelect: $('silenceSelect'),
   vadThresholdSelect: $('vadThresholdSelect'),
   draftCaptionCheck: $('draftCaptionCheck'),
@@ -359,6 +362,92 @@ function saveState() {
     try {
       localStorage.setItem(STORAGE_KEYS.messages, JSON.stringify(buildPruned(0, 60)));
     } catch (_) {}
+  }
+}
+
+// Zero-risk exact-match LRU Phrase Cache (max 200 entries, typed text input only, auto-learned solely from verified Gemini outputs)
+const PHRASE_CACHE_MAX = 200;
+const phraseCacheMap = new Map();
+{
+  const savedEntries = loadJson(STORAGE_KEYS.phraseCache, []);
+  if (Array.isArray(savedEntries)) {
+    for (const entry of savedEntries.slice(-PHRASE_CACHE_MAX)) {
+      if (Array.isArray(entry) && typeof entry[0] === 'string' && entry[1] && typeof entry[1] === 'object') {
+        phraseCacheMap.set(entry[0], entry[1]);
+      }
+    }
+  }
+}
+
+function buildPhraseCacheKey(text, targetLang, tone, glossary = '') {
+  const normText = String(text || '').trim().replace(/\s+/g, ' ');
+  if (!normText || normText.length > 160) return '';
+  const normGlossary = String(glossary || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  return `${targetLang || 'en'}|${tone || 'natural'}|${normGlossary}|${normText}`;
+}
+
+function persistPhraseCache() {
+  try {
+    localStorage.setItem(STORAGE_KEYS.phraseCache, JSON.stringify(Array.from(phraseCacheMap.entries())));
+  } catch (_) {}
+}
+
+export function lookupPhraseCache(text, targetLang, tone, glossary = '') {
+  const key = buildPhraseCacheKey(text, targetLang, tone, glossary);
+  if (!key || !phraseCacheMap.has(key)) return null;
+  const hit = phraseCacheMap.get(key);
+  // Refresh LRU recency
+  phraseCacheMap.delete(key);
+  phraseCacheMap.set(key, hit);
+  return { ...hit };
+}
+
+export function storePhraseCache(text, targetLang, tone, glossary, result) {
+  if (!result || !result.translated) return false;
+  const key = buildPhraseCacheKey(text, targetLang, tone, glossary);
+  if (!key) return false;
+  const record = {
+    sourceLang: result.sourceLang,
+    targetLang: result.targetLang,
+    isSourceChinese: Boolean(result.isSourceChinese),
+    sourceText: result.sourceText || String(text || '').trim(),
+    zh: result.zh,
+    translated: result.translated,
+    reading: result.reading || '',
+  };
+  if (phraseCacheMap.has(key)) {
+    phraseCacheMap.delete(key);
+  }
+  phraseCacheMap.set(key, record);
+  while (phraseCacheMap.size > PHRASE_CACHE_MAX) {
+    const oldestKey = phraseCacheMap.keys().next().value;
+    phraseCacheMap.delete(oldestKey);
+  }
+  persistPhraseCache();
+  return true;
+}
+
+function isOpusAudioFormatError(err) {
+  const msg = String(err?.message || '');
+  return /\(400\)/.test(msg) && /audio|mime|ogg|opus|unsupported|invalid argument|unable to process/i.test(msg);
+}
+
+/**
+ * Transparently retry with WAV if Gemini API ever rejects an `audio/ogg` Opus payload (HTTP 400).
+ */
+async function callWithOpusFallback(wav, invokeWithAudio) {
+  try {
+    return await invokeWithAudio(wav);
+  } catch (err) {
+    if (wav && wav.mimeType === 'audio/ogg' && typeof wav.fallbackWav === 'function' && isOpusAudioFormatError(err)) {
+      console.warn('audio/ogg rejected by API, switching cleanly to WAV fallback:', err?.message || err);
+      audio.disableOpusCompression();
+      const fallback = wav.fallbackWav();
+      if (fallback) {
+        return await invokeWithAudio(fallback);
+      }
+    }
+    throw err;
   }
 }
 
@@ -1516,6 +1605,7 @@ async function startLiveSession({ resume = false, epoch = sessionEpoch } = {}) {
       model: settings.liveModel || 'gemini-3.8-live',
       targetLang: settings.targetLang,
       tone: settings.tone,
+      glossary: settings.glossary || '',
       voiceName: settings.voiceName,
       resume,
     });
@@ -1805,6 +1895,7 @@ export function applyBroadcastCommit(job, result) {
   if (pendingInline) pendingInline.remove();
 
   let changed = false;
+  let revisedApplied = false;
 
   // 1. Apply single-pass retroactive semantic refinement to the previous tail segment (zero extra API call!)
   if (job.prevTailSegId) {
@@ -1818,10 +1909,16 @@ export function applyBroadcastCommit(job, result) {
         updateBroadcastSpanInPlace(found.seg.id, found.seg.text, true);
         flashBroadcastHint('✨ 已依後續語境回頭潤飾前句語意');
         changed = true;
+        revisedApplied = true;
       } else {
         updateBroadcastSpanInPlace(found.seg.id, found.seg.text, false);
       }
     }
+  }
+  if (!revisedApplied && els.broadcastHint && els.broadcastHint.textContent.includes('正在依新語境')) {
+    clearTimeout(bcHintTimer);
+    els.broadcastHint.classList.remove('revised-notice');
+    els.broadcastHint.textContent = '純繁體中文・自動回頭潤飾語意';
   }
 
   // 2. Append newly translated Traditional Chinese continuously inline (or start a clean paragraph on topic shift)
@@ -1930,6 +2027,7 @@ async function polishBroadcastTail(manualTrigger = false) {
     const polished = await polishBroadcastText({
       apiKey: settings.apiKey,
       model: settings.model,
+      glossary: settings.glossary || '',
       priorContext,
       draftText,
     });
@@ -2344,26 +2442,30 @@ async function runVadJob(job) {
         settings.turboMode ? 180 : 260
       );
 
-      job.broadcastResult = await interpretBroadcastAudio({
-        apiKey: settings.apiKey,
-        model: settings.model,
-        wavBase64: job.wav.base64,
-        mimeType: job.wav.mimeType,
-        preferredLang: job.targetLang,
-        prevTailText: tail ? tail.seg.text : '',
-        priorContext,
-        onStream: ({ revisedPrev, currentZh }) => {
-          job.latestStream = { revisedPrev, currentZh };
-          if (vadCommitQueue[0] === job && job.bcEpoch === bcEpoch) {
-            if (currentZh) {
-              upsertBroadcastStreamSpan(currentZh);
-            } else if (revisedPrev && els.broadcastHint) {
-              els.broadcastHint.textContent = '✨ 正在依新語境回頭潤飾前句⋯';
-              els.broadcastHint.classList.add('revised-notice');
+      job.broadcastResult = await callWithOpusFallback(job.wav, (audioPayload) =>
+        interpretBroadcastAudio({
+          apiKey: settings.apiKey,
+          model: settings.model,
+          wavBase64: audioPayload.base64,
+          mimeType: audioPayload.mimeType,
+          preferredLang: job.targetLang,
+          glossary: settings.glossary || '',
+          prevTailText: tail ? tail.seg.text : '',
+          priorContext,
+          onStream: ({ currentZh, revising }) => {
+            job.latestStream = { currentZh, revising };
+            if (vadCommitQueue[0] === job && job.bcEpoch === bcEpoch) {
+              if (currentZh) {
+                upsertBroadcastStreamSpan(currentZh);
+              }
+              if (revising && els.broadcastHint) {
+                els.broadcastHint.textContent = '✨ 正在依新語境回頭潤飾前句⋯';
+                els.broadcastHint.classList.add('revised-notice');
+              }
             }
-          }
-        },
-      });
+          },
+        })
+      );
     } else {
       const onStream = (chunk) => {
         job.latestStream = chunk;
@@ -2374,18 +2476,21 @@ async function runVadJob(job) {
         }
       };
 
-      job.utterances = await interpretDialogueAudio({
-        apiKey: settings.apiKey,
-        model: settings.model,
-        wavBase64: job.wav.base64,
-        mimeType: job.wav.mimeType,
-        targetLang: job.targetLang,
-        tone: job.tone,
-        speakerMemory,
-        recentContext: messages.slice(-job.contextLimit),
-        contextLimit: job.contextLimit,
-        onStream,
-      });
+      job.utterances = await callWithOpusFallback(job.wav, (audioPayload) =>
+        interpretDialogueAudio({
+          apiKey: settings.apiKey,
+          model: settings.model,
+          wavBase64: audioPayload.base64,
+          mimeType: audioPayload.mimeType,
+          targetLang: job.targetLang,
+          tone: job.tone,
+          glossary: settings.glossary || '',
+          speakerMemory,
+          recentContext: messages.slice(-job.contextLimit),
+          contextLimit: job.contextLimit,
+          onStream,
+        })
+      );
     }
   } catch (err) {
     job.error = err;
@@ -2564,7 +2669,7 @@ async function finishManualRecording() {
   if (els.cameraBtn) els.cameraBtn.classList.remove('hidden');
   updateSwitchUI();
 
-  const wav = audio.stopManualCapture();
+  const wav = await audio.stopManualCapture();
   if (!wav) {
     showToast('錄音時間太短，請再試一次');
     return;
@@ -2670,14 +2775,17 @@ function toggleKeyboardInput(forceState) {
 async function handleQuickTextSend() {
   const text = els.quickChineseInput.value.trim();
   if (!text) return;
-  if (!settings.apiKey) {
-    showToast('請先填入 Gemini API Key');
-    openSettings();
-    return;
-  }
-  if (!isOnline) {
-    showToast('目前處於離線狀態，無法翻譯');
-    return;
+  const hasCachedHit = Boolean(lookupPhraseCache(text, settings.targetLang, settings.tone, settings.glossary));
+  if (!hasCachedHit) {
+    if (!settings.apiKey) {
+      showToast('請先填入 Gemini API Key');
+      openSettings();
+      return;
+    }
+    if (!isOnline) {
+      showToast('目前處於離線狀態，無法翻譯');
+      return;
+    }
   }
   els.quickChineseInput.value = '';
   els.quickChineseInput.blur();
@@ -2686,28 +2794,73 @@ async function handleQuickTextSend() {
   await runOutboundTranslation({ textInput: text });
 }
 
+function buildOutboundMessageFromResult(result) {
+  return result.isSourceChinese
+    ? {
+        id: makeId(),
+        direction: 'outbound',
+        speaker: '我',
+        lang: 'zh',
+        targetLang: result.targetLang,
+        isChinese: true,
+        zh: result.sourceText,
+        translated: result.translated,
+        reading: result.reading,
+        time: nowTimeStr(),
+      }
+    : {
+        id: makeId(),
+        direction: 'inbound',
+        speaker: '譯',
+        lang: result.sourceLang,
+        isChinese: false,
+        original: result.sourceText,
+        zh: result.translated,
+        time: nowTimeStr(),
+      };
+}
+
 async function runOutboundTranslation({ wav = null, textInput = null }) {
+  // Zero-risk exact-match local cache for repeated typed phrases (0ms latency, 0 API tokens; never used for voice)
+  if (textInput && !wav) {
+    const cached = lookupPhraseCache(textInput, settings.targetLang, settings.tone, settings.glossary);
+    if (cached) {
+      const msg = buildOutboundMessageFromResult(cached);
+      messages.push(msg);
+      saveState();
+      appendMessageCard(msg, true);
+      return;
+    }
+  }
+
   pendingCount += 1;
   syncPendingPillDom();
   updateHeaderStatus();
   const ctxLimit = settings.turboMode ? 2 : 5;
+  const targetLangAtReq = settings.targetLang;
+  const toneAtReq = settings.tone;
+  const glossaryAtReq = settings.glossary || '';
 
   try {
-    const result = await translateOutboundChinese({
-      apiKey: settings.apiKey,
-      model: settings.model,
-      targetLang: settings.targetLang,
-      tone: settings.tone,
-      wavBase64: wav ? wav.base64 : null,
-      mimeType: wav ? wav.mimeType : 'audio/wav',
-      textInput,
-      recentContext: messages.slice(-ctxLimit),
-      contextLimit: ctxLimit,
-      onStream: (chunk) => {
-        upsertDraftCaptionDom('');
-        upsertStreamingCardDom(chunk);
-      },
-    });
+    const invokeTranslate = (audioPayload) =>
+      translateOutboundChinese({
+        apiKey: settings.apiKey,
+        model: settings.model,
+        targetLang: targetLangAtReq,
+        tone: toneAtReq,
+        glossary: glossaryAtReq,
+        wavBase64: audioPayload ? audioPayload.base64 : null,
+        mimeType: audioPayload ? audioPayload.mimeType : 'audio/wav',
+        textInput,
+        recentContext: messages.slice(-ctxLimit),
+        contextLimit: ctxLimit,
+        onStream: (chunk) => {
+          upsertDraftCaptionDom('');
+          upsertStreamingCardDom(chunk);
+        },
+      });
+
+    const result = wav ? await callWithOpusFallback(wav, invokeTranslate) : await invokeTranslate(null);
 
     clearStreamingCardDom();
 
@@ -2716,30 +2869,11 @@ async function runOutboundTranslation({ wav = null, textInput = null }) {
       return;
     }
 
-    const msg = result.isSourceChinese
-      ? {
-          id: makeId(),
-          direction: 'outbound',
-          speaker: '我',
-          lang: 'zh',
-          targetLang: result.targetLang,
-          isChinese: true,
-          zh: result.sourceText,
-          translated: result.translated,
-          reading: result.reading,
-          time: nowTimeStr(),
-        }
-      : {
-          id: makeId(),
-          direction: 'inbound',
-          speaker: '譯',
-          lang: result.sourceLang,
-          isChinese: false,
-          original: result.sourceText,
-          zh: result.translated,
-          time: nowTimeStr(),
-        };
+    if (textInput && !wav) {
+      storePhraseCache(textInput, targetLangAtReq, toneAtReq, glossaryAtReq, result);
+    }
 
+    const msg = buildOutboundMessageFromResult(result);
     messages.push(msg);
     saveState();
     appendMessageCard(msg, true);
@@ -2896,6 +3030,7 @@ function openSettings() {
   els.ttsModelSelect.value = settings.ttsModel;
   els.voiceSelect.value = settings.voiceName;
   els.toneSelect.value = settings.tone;
+  if (els.glossaryInput) els.glossaryInput.value = settings.glossary || '';
   const validSilences = ['600', '750', '1100', '1600'];
   const silStr = validSilences.includes(String(settings.silenceMs)) ? String(settings.silenceMs) : '750';
   els.silenceSelect.value = silStr;
@@ -2920,6 +3055,7 @@ function saveSettingsFromForm() {
   const prevLiveModel = settings.liveModel;
   const prevUseLive = Boolean(settings.useLiveInDialogue);
   const prevTone = settings.tone;
+  const prevGlossary = settings.glossary || '';
 
   settings.apiKey = els.apiKeyInput.value.trim();
   settings.model = els.modelSelect.value;
@@ -2928,6 +3064,7 @@ function saveSettingsFromForm() {
   settings.ttsModel = els.ttsModelSelect.value;
   settings.voiceName = els.voiceSelect.value;
   settings.tone = els.toneSelect.value;
+  if (els.glossaryInput) settings.glossary = els.glossaryInput.value.trim().slice(0, 300);
   settings.silenceMs = Number(els.silenceSelect.value);
   settings.vadThreshold = Number(els.vadThresholdSelect.value);
   if (els.draftCaptionCheck) settings.draftCaption = els.draftCaptionCheck.checked;
@@ -2974,7 +3111,10 @@ function saveSettingsFromForm() {
     } else if (
       isLiveActive &&
       liveConnected &&
-      (prevLiveModel !== settings.liveModel || prevVoice !== settings.voiceName || prevTone !== settings.tone)
+      (prevLiveModel !== settings.liveModel ||
+        prevVoice !== settings.voiceName ||
+        prevTone !== settings.tone ||
+        prevGlossary !== settings.glossary)
     ) {
       const epoch = ++sessionEpoch;
       startLiveSession({ resume: false, epoch }).catch((err) =>

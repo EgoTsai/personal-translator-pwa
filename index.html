@@ -12,10 +12,11 @@
   <link rel="manifest" href="./manifest.json" />
   <link rel="icon" type="image/svg+xml" href="./icon.svg" />
   <link rel="apple-touch-icon" href="./icon-192.png" />
+  <link rel="preconnect" href="https://generativelanguage.googleapis.com" crossorigin />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=2.7" />
+  <link rel="stylesheet" href="./styles.css?v=2.8" />
 </head>
 <body>
   <div class="app-shell" id="appShell">
@@ -27,7 +28,7 @@
           <div class="brand-text">
             <div class="brand-title-row" style="display:flex;align-items:center;gap:5px;white-space:nowrap;">
               <h1 class="brand-title">隨身口譯官</h1>
-              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v2.7</button>
+              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v2.8</button>
             </div>
             <div class="status-line">
               <span class="status-dot ready" id="statusDot"></span>
@@ -298,6 +299,17 @@
         </div>
 
         <div class="field-group">
+          <label class="field-label" for="glossaryInput">個人專有名詞表（Glossary・選填）</label>
+          <textarea
+            id="glossaryInput"
+            class="textarea-control"
+            rows="2"
+            placeholder="例：TSMC=台積電, Fed=聯準會, fika=瑞典下午茶, Ego=我的名字"
+          ></textarea>
+          <span class="field-hint">常聽到的公司、人名、專業術語可填在此，模型第一次就會翻準，免回頭重修、更省更快。</span>
+        </div>
+
+        <div class="field-group">
           <label class="field-label" for="silenceSelect">對話模式停頓斷句速度（標準模式）</label>
           <select id="silenceSelect" class="select-control">
             <option value="600">極速（停頓 0.6 秒送出，反應最快）</option>
@@ -388,6 +400,6 @@
   <!-- Toast -->
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="./app.js?v=2.7"></script>
+  <script type="module" src="./app.js?v=2.8"></script>
 </body>
 </html>

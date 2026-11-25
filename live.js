@@ -5,20 +5,26 @@
  * and 24kHz PCM audio caching.
  */
 
-import { TARGET_LANGUAGES, TONE_PRESETS } from './gemini.js?v=2.7';
-import { uint8ToBase64, base64ToUint8 } from './audio.js?v=2.7';
+import { TARGET_LANGUAGES, TONE_PRESETS, formatGlossaryLine } from './gemini.js?v=2.8';
+import { uint8ToBase64, base64ToUint8 } from './audio.js?v=2.8';
 
 const LIVE_WS_ENDPOINT =
   'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
 
-export function buildLiveSystemInstruction(targetLang = 'en', tone = 'natural') {
+export function buildLiveSystemInstruction(targetLang = 'en', tone = 'natural', glossary = '') {
   const langInfo = TARGET_LANGUAGES[targetLang] || TARGET_LANGUAGES.en;
   const toneDesc = TONE_PRESETS[tone] || TONE_PRESETS.natural;
+  const glossaryLine = formatGlossaryLine(glossary);
 
-  return `你是即時同步口譯員，只做雙向翻譯，絕不聊天、不回答問題、不加前言。
-- 聽到非中文（英／日／瑞典等）：直接翻成自然繁體中文（台灣用語）。
-- 聽到中文：直接翻成自然道地的${langInfo.label}（${langInfo.nativeName}），語氣：${toneDesc}。
-- 若只有雜音或無語音，保持靜默。`;
+  return [
+    `你是即時同步口譯員，只做雙向翻譯，絕不聊天、不回答問題、不加前言。`,
+    `- 聽到非中文（英／日／瑞典等）：直接翻成自然繁體中文（台灣用語）。`,
+    `- 聽到中文：直接翻成自然道地的${langInfo.label}（${langInfo.nativeName}），語氣：${toneDesc}。`,
+    glossaryLine ? `- ${glossaryLine}` : '',
+    `- 若只有雜音或無語音，保持靜默。`,
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 export class GeminiLiveClient {
@@ -50,6 +56,7 @@ export class GeminiLiveClient {
     model = 'gemini-3.8-live',
     targetLang = 'en',
     tone = 'natural',
+    glossary = '',
     voiceName = 'Kore',
     resume = false,
   }) {
@@ -125,7 +132,7 @@ export class GeminiLiveClient {
               },
             },
             systemInstruction: {
-              parts: [{ text: buildLiveSystemInstruction(targetLang, tone) }],
+              parts: [{ text: buildLiveSystemInstruction(targetLang, tone, glossary) }],
             },
             inputAudioTranscription: {},
             outputAudioTranscription: {},
