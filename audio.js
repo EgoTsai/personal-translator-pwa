@@ -856,6 +856,10 @@ export class AudioEngine {
     return false;
   }
 
+  resetActiveSpeechBuffer() {
+    this._resetVadBuffers();
+  }
+
   async startManualCapture() {
     // Pause TTS if currently playing
     this.stopPlayback();

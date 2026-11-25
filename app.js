@@ -2,7 +2,7 @@
  * app.js — Main UI controller for 隨身口譯官 PWA
  */
 
-import { AudioEngine } from './audio.js?v=3.0';
+import { AudioEngine } from './audio.js?v=3.1';
 import {
   TARGET_LANGUAGES,
   ICEBREAKER_BANNERS,
@@ -13,8 +13,8 @@ import {
   translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
-} from './gemini.js?v=3.0';
-import { GeminiLiveClient } from './live.js?v=3.0';
+} from './gemini.js?v=3.1';
+import { GeminiLiveClient } from './live.js?v=3.1';
 
 const STORAGE_KEYS = {
   settings: 'pt_settings_v1',
@@ -269,6 +269,7 @@ const els = {
   bcFontBtn: $('bcFontBtn'),
   bcPolishBtn: $('bcPolishBtn'),
   bcCopyBtn: $('bcCopyBtn'),
+  bcClearBtn: $('bcClearBtn'),
   broadcastCanvas: $('broadcastCanvas'),
   broadcastEmpty: $('broadcastEmpty'),
   bcDemoBtn: $('bcDemoBtn'),
@@ -452,12 +453,32 @@ async function callWithOpusFallback(wav, invokeWithAudio) {
 }
 
 let toastTimer = null;
-function showToast(msg, duration = 2600) {
-  els.toast.textContent = msg;
+function showToast(msg, duration = 2600, action = null) {
+  els.toast.textContent = '';
+  const textSpan = document.createElement('span');
+  textSpan.textContent = msg;
+  els.toast.appendChild(textSpan);
+
+  if (action && action.label && typeof action.onClick === 'function') {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'toast-undo-btn';
+    btn.textContent = action.label;
+    btn.addEventListener('click', () => {
+      clearTimeout(toastTimer);
+      els.toast.classList.remove('show', 'has-action');
+      action.onClick();
+    });
+    els.toast.appendChild(btn);
+    els.toast.classList.add('has-action');
+  } else {
+    els.toast.classList.remove('has-action');
+  }
+
   els.toast.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
-    els.toast.classList.remove('show');
+    els.toast.classList.remove('show', 'has-action');
   }, duration);
 }
 
@@ -496,6 +517,23 @@ function applyTheme() {
   applyBroadcastFont();
 }
 
+function syncClearButtonsState() {
+  const isBcView = viewMode === 'broadcast';
+  const hasDialogue = messages.length > 0 || Boolean(activeStreamState) || Boolean(currentDraftText);
+  const hasBroadcast = broadcastParagraphs.length > 0 || Boolean(bcStreamText);
+
+  if (els.clearBtn) {
+    const isEmpty = isBcView ? !hasBroadcast : !hasDialogue;
+    els.clearBtn.classList.toggle('empty', isEmpty);
+    const title = isBcView ? '一鍵清除聆聽譯文，從頭開始' : '一鍵清除對話內容，從頭開始';
+    els.clearBtn.title = title;
+    els.clearBtn.setAttribute('aria-label', title);
+  }
+  if (els.bcClearBtn) {
+    els.bcClearBtn.classList.toggle('empty', !hasBroadcast);
+  }
+}
+
 function syncViewModeUI() {
   const isBcView = viewMode === 'broadcast';
   if (els.appShell) {
@@ -504,11 +542,7 @@ function syncViewModeUI() {
   if (els.broadcastPausedBar) {
     els.broadcastPausedBar.classList.toggle('visible', isBcView && activeMode !== 'broadcast');
   }
-  if (els.clearBtn) {
-    const title = isBcView ? '清除聆聽譯文' : '清除對話';
-    els.clearBtn.title = title;
-    els.clearBtn.setAttribute('aria-label', title);
-  }
+  syncClearButtonsState();
 }
 
 function updateHeaderStatus() {
@@ -916,6 +950,7 @@ function appendMessageCard(msg, forceScroll = false) {
   }
 
   if (shouldScroll) scrollFeedToBottom(true);
+  syncClearButtonsState();
 }
 
 function renderFeed(forceScroll = true) {
@@ -947,6 +982,7 @@ function renderFeed(forceScroll = true) {
   }
 
   scrollFeedToBottom(forceScroll);
+  syncClearButtonsState();
 }
 
 const FLAG_SVG_MAP = {
@@ -1774,6 +1810,7 @@ function renderBroadcastCanvas(forceScroll = true) {
 
   if (broadcastParagraphs.length === 0 && !bcStreamText && broadcastPendingCount === 0) {
     if (els.broadcastEmpty) canvas.appendChild(els.broadcastEmpty);
+    syncClearButtonsState();
     return;
   }
 
@@ -1790,6 +1827,7 @@ function renderBroadcastCanvas(forceScroll = true) {
   }
 
   scrollBroadcastToBottom(forceScroll);
+  syncClearButtonsState();
 }
 
 function getOrCreateActiveBroadcastParaEl() {
@@ -2009,6 +2047,7 @@ export function applyBroadcastCommit(job, result) {
     saveState();
   }
   if (shouldScroll) scrollBroadcastToBottom(true);
+  syncClearButtonsState();
 }
 
 /**
@@ -3553,30 +3592,90 @@ els.themeBtn.addEventListener('click', () => {
 
 els.exportBtn.addEventListener('click', exportTranscript);
 
-els.clearBtn.addEventListener('click', () => {
-  if (viewMode === 'broadcast') {
-    if (broadcastParagraphs.length === 0) return;
-    if (!window.confirm('確定要清除目前所有聆聽翻譯的中文內容嗎？')) return;
+function clearCurrentTranslations(targetView = viewMode) {
+  haptic(12);
+  if (targetView === 'broadcast') {
+    const hadContent = broadcastParagraphs.length > 0 || Boolean(bcStreamText);
+    if (!hadContent) {
+      showToast('目前沒有已翻譯的聆聽內容', 1600);
+      return;
+    }
+    const backupParagraphs = broadcastParagraphs.slice();
     clearTimeout(bcDemoTimer);
     bcEpoch += 1;
     clearBroadcastStreamSpan();
+    const pendingInline = document.getElementById('bcPendingInline');
+    if (pendingInline) pendingInline.remove();
+    if (activeMode === 'broadcast') {
+      audio.resetActiveSpeechBuffer();
+    }
     broadcastParagraphs = [];
     saveState();
     renderBroadcastCanvas(true);
-    showToast('已清除聆聽譯文');
+    if (els.broadcastHint) {
+      clearTimeout(bcHintTimer);
+      els.broadcastHint.classList.remove('revised-notice');
+      els.broadcastHint.textContent = '純繁體中文・自動回頭潤飾語意';
+    }
+    showToast('已清除聆聽譯文，從頭開始', 4800, {
+      label: '復原',
+      onClick: () => {
+        if (broadcastParagraphs.length === 0) {
+          broadcastParagraphs = backupParagraphs;
+          saveState();
+          renderBroadcastCanvas(true);
+          showToast('已復原剛剛清除的聆聽譯文', 1800);
+        }
+      },
+    });
     return;
   }
-  if (messages.length === 0) return;
-  if (!window.confirm('確定要清除目前所有對話紀錄與說話者記憶嗎？')) return;
+
+  const hadDialogue = messages.length > 0 || Boolean(activeStreamState) || Boolean(currentDraftText);
+  if (!hadDialogue) {
+    showToast('目前沒有已翻譯的對話內容', 1600);
+    return;
+  }
+  const backupMessages = messages.slice();
+  const backupSpeakers = JSON.parse(JSON.stringify(speakerMemory));
   feedEpoch += 1;
-  audio.stopPlayback();
+  cancelActiveSpeak();
+  audio.clearTtsCache();
   clearStreamingCardDom();
+  upsertDraftCaptionDom('');
+  const pendingPill = document.getElementById('pendingPill');
+  if (pendingPill) pendingPill.remove();
+  if (activeMode === 'dialogue' && !isLiveActive) {
+    audio.resetActiveSpeechBuffer();
+  }
+  // If Live WebSocket is active, restart a clean session so AI forgets old context
+  if (activeMode === 'dialogue' && isLiveActive && liveConnected) {
+    const epoch = ++sessionEpoch;
+    startLiveSession({ resume: false, epoch }).catch(() => {});
+  }
   messages = [];
   speakerMemory = {};
+  openSpeakerPickerMsgId = null;
   saveState();
-  renderFeed();
-  showToast('已清除對話紀錄');
-});
+  renderFeed(true);
+  showToast('已清除翻譯內容，從頭開始', 4800, {
+    label: '復原',
+    onClick: () => {
+      if (messages.length === 0) {
+        messages = backupMessages;
+        speakerMemory = backupSpeakers;
+        saveState();
+        renderFeed(true);
+        showToast('已復原剛剛清除的對話內容', 1800);
+      }
+    },
+  });
+}
+
+els.clearBtn.addEventListener('click', () => clearCurrentTranslations(viewMode));
+if (els.bcClearBtn) {
+  els.bcClearBtn.addEventListener('click', () => clearCurrentTranslations('broadcast'));
+}
 
 els.settingsBtn.addEventListener('click', openSettings);
 els.bannerSetupBtn.addEventListener('click', openSettings);
