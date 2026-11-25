@@ -2,7 +2,7 @@
  * app.js — Main UI controller for 隨身口譯官 PWA
  */
 
-import { AudioEngine } from './audio.js?v=3.4';
+import { AudioEngine } from './audio.js?v=3.4.1';
 import {
   USD_TO_TWD,
   MODEL_CATALOG_ORDER,
@@ -20,8 +20,8 @@ import {
   translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
-} from './gemini.js?v=3.4';
-import { GeminiLiveClient } from './live.js?v=3.4';
+} from './gemini.js?v=3.4.1';
+import { GeminiLiveClient } from './live.js?v=3.4.1';
 import {
   generateDriveSecret,
   isValidAppsScriptUrl,
@@ -30,7 +30,7 @@ import {
   testDriveBridge,
   uploadDocToDrive,
   buildBilingualPlainText,
-} from './drive.js?v=3.4';
+} from './drive.js?v=3.4.1';
 
 const STORAGE_KEYS = {
   settings: 'pt_settings_v1',
@@ -352,6 +352,7 @@ const els = {
   driveSetupBadge: $('driveSetupBadge'),
   driveFolderInput: $('driveFolderInput'),
   driveSecretDisplay: $('driveSecretDisplay'),
+  toggleDriveSecretBtn: $('toggleDriveSecretBtn'),
   regenDriveSecretBtn: $('regenDriveSecretBtn'),
   copyAppsScriptBtn: $('copyAppsScriptBtn'),
   driveWebhookInput: $('driveWebhookInput'),
@@ -3532,9 +3533,11 @@ function openSettings({ focusQuota = false, focusDrive = false } = {}) {
 }
 
 function closeSettings() {
-  // Always re-mask API Key input when closing settings so it never stays exposed in plaintext
+  // Always re-mask API Key & Drive Secret inputs when closing settings so they never stay exposed in plaintext
   if (els.apiKeyInput) els.apiKeyInput.type = 'password';
   if (els.toggleKeyVisibility) els.toggleKeyVisibility.textContent = '顯示';
+  if (els.driveSecretDisplay) els.driveSecretDisplay.type = 'password';
+  if (els.toggleDriveSecretBtn) els.toggleDriveSecretBtn.textContent = '顯示';
   els.settingsSheet.classList.remove('open');
   els.settingsSheet.setAttribute('aria-hidden', 'true');
   renderQuotaUI();
@@ -3560,6 +3563,12 @@ function saveSettingsFromForm() {
   }
   if (els.driveFolderInput) {
     settings.driveFolderName = els.driveFolderInput.value.trim().slice(0, 60) || '隨身口譯官';
+  }
+  if (els.driveSecretDisplay) {
+    const typedSecret = els.driveSecretDisplay.value.trim();
+    if (typedSecret.length >= 8) {
+      settings.driveSecret = typedSecret.slice(0, 128);
+    }
   }
   if (els.driveWebhookInput) {
     const rawUrl = els.driveWebhookInput.value.trim();
@@ -4592,9 +4601,22 @@ if (els.confirmDriveUploadBtn) {
 }
 
 // Settings: Personal Apps Script Bridge Controls
+function getFormDriveSecret() {
+  const typed = els.driveSecretDisplay ? els.driveSecretDisplay.value.trim() : '';
+  return typed.length >= 8 ? typed : ensureDriveSecret();
+}
+if (els.toggleDriveSecretBtn && els.driveSecretDisplay) {
+  els.toggleDriveSecretBtn.addEventListener('click', () => {
+    const isPwd = els.driveSecretDisplay.type === 'password';
+    els.driveSecretDisplay.type = isPwd ? 'text' : 'password';
+    els.toggleDriveSecretBtn.textContent = isPwd ? '隱藏' : '顯示';
+  });
+}
 if (els.copyAppsScriptBtn) {
   els.copyAppsScriptBtn.addEventListener('click', async () => {
-    const secret = ensureDriveSecret();
+    const secret = getFormDriveSecret();
+    settings.driveSecret = secret;
+    saveState();
     const folderName = (els.driveFolderInput && els.driveFolderInput.value.trim()) || settings.driveFolderName || '隨身口譯官';
     const code = buildAppsScriptCode({ secret, folderName });
     try {
@@ -4624,7 +4646,7 @@ if (els.testDriveBtn) {
   els.testDriveBtn.addEventListener('click', async () => {
     const url = els.driveWebhookInput ? els.driveWebhookInput.value.trim() : '';
     const folderName = (els.driveFolderInput && els.driveFolderInput.value.trim()) || '隨身口譯官';
-    const secret = ensureDriveSecret();
+    const secret = getFormDriveSecret();
     if (els.driveTestResult) {
       els.driveTestResult.className = 'test-result';
       els.driveTestResult.textContent = '連線測試中⋯';
@@ -4633,6 +4655,7 @@ if (els.testDriveBtn) {
       const res = await testDriveBridge({ webhookUrl: url, secret, folderName });
       settings.driveWebhookUrl = url;
       settings.driveFolderName = folderName;
+      settings.driveSecret = secret;
       saveState();
       syncDriveSetupBadge(url);
       if (els.driveTestResult) {

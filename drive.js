@@ -276,9 +276,12 @@ async function postToDriveBridge(webhookUrl, payload, timeoutMs = 28000) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    // Use `text/plain;charset=utf-8` so browser performs a CORS simple request (Apps Script does not handle OPTIONS preflight)
+    // Use `text/plain;charset=utf-8` + `credentials: 'omit'` for a clean CORS simple request
+    // (Apps Script does not handle OPTIONS preflight and multi-account Google cookies can break redirects)
     const resp = await fetch(url, {
       method: 'POST',
+      mode: 'cors',
+      credentials: 'omit',
       redirect: 'follow',
       headers: {
         'Content-Type': 'text/plain;charset=utf-8',
@@ -306,6 +309,12 @@ async function postToDriveBridge(webhookUrl, payload, timeoutMs = 28000) {
   } catch (err) {
     if (err && err.name === 'AbortError') {
       throw new Error('連線逾時，請確認網路狀態後重試。');
+    }
+    const msg = String(err?.message || err || '');
+    if (/failed to fetch|load failed|networkerror/i.test(msg)) {
+      throw new Error(
+        '連線被阻擋（Failed to fetch）：請在 Apps Script「部署 → 管理部署作業」確認「誰可以存取」已改為「所有人（Anyone）」，且存檔後有部署「新版本」。'
+      );
     }
     throw err;
   } finally {

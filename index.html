@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
   <meta
     http-equiv="Content-Security-Policy"
-    content="default-src 'self'; script-src 'self' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' https://generativelanguage.googleapis.com wss://generativelanguage.googleapis.com https://script.google.com https://script.googleusercontent.com; object-src 'none'; base-uri 'self'; form-action 'none';"
+    content="default-src 'self'; script-src 'self' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' https://generativelanguage.googleapis.com wss://generativelanguage.googleapis.com https://script.google.com https://script.googleusercontent.com https://*.googleusercontent.com; object-src 'none'; base-uri 'self'; form-action 'none';"
   />
   <meta name="referrer" content="strict-origin-when-cross-origin" />
   <title>隨身口譯官 — 英・日・瑞典 ↔ 中文專屬語音翻譯</title>
@@ -21,7 +21,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=3.4" />
+  <link rel="stylesheet" href="./styles.css?v=3.4.1" />
 </head>
 <body>
   <div class="app-shell" id="appShell">
@@ -33,7 +33,7 @@
           <div class="brand-text">
             <div class="brand-title-row" style="display:flex;align-items:center;gap:5px;white-space:nowrap;">
               <h1 class="brand-title">隨身口譯官</h1>
-              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v3.4</button>
+              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v3.4.1</button>
             </div>
             <div class="status-line">
               <span class="status-dot ready" id="statusDot"></span>
@@ -483,15 +483,16 @@
             </div>
             <div class="quota-control-box">
               <label class="quota-mini-label" for="driveSecretDisplay">
-                <span>私人密鑰（本機產生）</span>
+                <span>私人密鑰</span>
+                <button type="button" class="inline-text-link" id="toggleDriveSecretBtn">顯示</button>
                 <button type="button" class="inline-text-link" id="regenDriveSecretBtn">重產</button>
               </label>
               <input
                 type="password"
                 id="driveSecretDisplay"
                 class="text-control quota-num-input"
-                readonly
-                autocomplete="off"
+                autocomplete="new-password"
+                spellcheck="false"
               />
             </div>
           </div>
@@ -629,6 +630,6 @@
   <!-- Toast -->
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="./app.js?v=3.4"></script>
+  <script type="module" src="./app.js?v=3.4.1"></script>
 </body>
 </html>
