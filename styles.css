@@ -1,5 +1,5 @@
 /* ============================================================================
-   隨身口譯官 v3.2 — Apple iOS / visionOS-Inspired Design System
+   隨身口譯官 v3.3 — Apple iOS / visionOS-Inspired Design System
    Continuous squircle & capsule geometry, frosted vibrancy materials,
    viewport-locked fixed top navigation, silky GPU mode transitions,
    and AAA light/dark contrast.
@@ -296,6 +296,47 @@ button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.quota-inline-pill {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2.5px 6.5px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid rgba(10, 125, 121, 0.18);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease, transform 0.14s var(--ease-spring);
+}
+
+[data-theme="dark"] .quota-inline-pill {
+  border-color: rgba(56, 194, 183, 0.24);
+}
+
+.quota-inline-pill:active {
+  transform: scale(0.92);
+}
+
+.quota-inline-pill.warn {
+  background: rgba(245, 158, 11, 0.14);
+  color: #B45309;
+  border-color: rgba(245, 158, 11, 0.30);
+}
+
+[data-theme="dark"] .quota-inline-pill.warn {
+  color: #FBBF24;
+  border-color: rgba(251, 191, 36, 0.32);
+}
+
+.quota-inline-pill.critical {
+  background: var(--live-soft);
+  color: var(--live);
+  border-color: rgba(224, 72, 62, 0.30);
 }
 
 .status-dot {
@@ -2596,6 +2637,281 @@ button {
 
 .bc-back-btn:active {
   transform: scale(0.96);
+}
+
+/* ============================================================================
+   Apple-Style Monthly Quota & Per-Model Remaining Time Dashboard (Settings)
+   ============================================================================ */
+.quota-card {
+  padding: 15px 15px 13px;
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.quota-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.quota-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.quota-eyebrow {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+
+.quota-big-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.quota-big-time {
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-big-time.warn {
+  color: #D97706;
+}
+
+[data-theme="dark"] .quota-big-time.warn {
+  color: #FBBF24;
+}
+
+.quota-big-time.critical {
+  color: var(--live);
+}
+
+.quota-active-tag {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2.5px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.quota-month-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-card);
+  color: var(--ink-secondary);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-progress-track {
+  width: 100%;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.quota-progress-fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(90deg, #0E9F99, var(--accent));
+  transition: width 0.35s var(--ease-apple), background 0.25s ease;
+}
+
+.quota-progress-fill.warn {
+  background: linear-gradient(90deg, #F59E0B, #D97706);
+}
+
+.quota-progress-fill.critical {
+  background: linear-gradient(90deg, #FF6457, var(--live));
+}
+
+.quota-summary-line {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-models-heading {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--ink-muted);
+  margin-top: 2px;
+}
+
+.quota-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.quota-model-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  text-align: left;
+  transition: border-color 0.2s var(--ease-apple), background 0.2s var(--ease-apple), transform 0.14s var(--ease-spring);
+}
+
+.quota-model-row:active {
+  transform: scale(0.98);
+}
+
+.quota-model-row.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: 0 2px 10px rgba(10, 125, 121, 0.10);
+}
+
+[data-theme="dark"] .quota-model-row.active {
+  border-color: rgba(56, 194, 183, 0.55);
+  box-shadow: 0 2px 12px rgba(56, 194, 183, 0.14);
+}
+
+.quota-model-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.quota-model-name {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.quota-model-tag {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--ink-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.quota-model-row.active .quota-model-name {
+  color: var(--accent);
+}
+
+.quota-model-right {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-model-rate {
+  font-size: 10.5px;
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+
+.quota-model-eta {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--ink);
+  min-width: 54px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.quota-model-row.active .quota-model-eta {
+  color: var(--accent);
+}
+
+.quota-controls-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.15fr;
+  gap: 9px;
+  margin-top: 2px;
+}
+
+.quota-control-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.quota-mini-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ink-secondary);
+}
+
+.quota-num-input {
+  height: 36px;
+  padding: 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-calibrate-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.quota-mini-btn {
+  height: 36px;
+  padding: 0 11px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.quota-footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.quota-reset-link {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--live);
+  padding: 4px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--live-soft);
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: transform 0.14s var(--ease-spring);
+}
+
+.quota-reset-link:active {
+  transform: scale(0.93);
 }
 
 /* Accessibility: Respect OS Reduced Motion Preference */

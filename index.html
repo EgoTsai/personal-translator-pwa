@@ -21,7 +21,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=3.2" />
+  <link rel="stylesheet" href="./styles.css?v=3.3" />
 </head>
 <body>
   <div class="app-shell" id="appShell">
@@ -33,11 +33,12 @@
           <div class="brand-text">
             <div class="brand-title-row" style="display:flex;align-items:center;gap:5px;white-space:nowrap;">
               <h1 class="brand-title">隨身口譯官</h1>
-              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v3.2</button>
+              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v3.3</button>
             </div>
             <div class="status-line">
               <span class="status-dot ready" id="statusDot"></span>
               <span id="statusText">待命中</span>
+              <button type="button" class="quota-inline-pill" id="quotaHeaderPill" title="點擊查看本月額度明細與各模型剩餘可用時間">剩約 64h</button>
             </div>
           </div>
         </div>
@@ -293,6 +294,65 @@
           <span class="field-hint">全系列皆支援原生語音輸入！已自動為 <strong>Gemini 3.8 Flash</strong>（low 思考）與 <strong>Gemini 4 Neon / Hydrogen</strong>（minimal 思考）調校低延遲設定。</span>
         </div>
 
+        <!-- Monthly Quota & Per-Model Remaining Time Card -->
+        <section class="quota-card" id="quotaSection" aria-label="本月額度與各模型剩餘時間">
+          <div class="quota-card-top">
+            <div class="quota-title-group">
+              <span class="quota-eyebrow">預估剩餘可用時間</span>
+              <div class="quota-big-row">
+                <strong class="quota-big-time" id="quotaBigTime">約 64h</strong>
+                <span class="quota-active-tag" id="quotaActiveModelTag">3.5 Flash-Lite</span>
+              </div>
+            </div>
+            <span class="quota-month-badge" id="quotaMonthBadge">本月</span>
+          </div>
+
+          <div class="quota-progress-track" aria-hidden="true">
+            <div class="quota-progress-fill" id="quotaProgressFill" style="width:0%;"></div>
+          </div>
+          <div class="quota-summary-line" id="quotaSummaryText">本月累計約 NT$0.0 / NT$300（剩 NT$300.0・0 次呼叫）</div>
+
+          <div class="quota-models-heading">切換模型即時對照（點擊可直接選用）</div>
+          <div class="quota-model-list" id="quotaModelList"></div>
+
+          <div class="quota-controls-grid">
+            <div class="quota-control-box">
+              <label class="quota-mini-label" for="budgetTwdInput">每月預算上限（NT$）</label>
+              <input
+                type="number"
+                id="budgetTwdInput"
+                class="text-control quota-num-input"
+                min="10"
+                max="100000"
+                step="50"
+                value="300"
+                inputmode="numeric"
+              />
+            </div>
+            <div class="quota-control-box">
+              <label class="quota-mini-label" for="calibrateSpentInput">手動校準已用（NT$）</label>
+              <div class="quota-calibrate-row">
+                <input
+                  type="number"
+                  id="calibrateSpentInput"
+                  class="text-control quota-num-input"
+                  min="0"
+                  max="100000"
+                  step="1"
+                  placeholder="例：45"
+                  inputmode="decimal"
+                />
+                <button class="btn-secondary quota-mini-btn" id="calibrateSpentBtn" type="button">校準</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="quota-footer-row">
+            <span class="field-hint">依 Gemini 每次回傳的實際 Token 精算，每月 1 日自動歸零；實際帳單仍以 AI Studio 為準。</span>
+            <button class="quota-reset-link" id="resetUsageBtn" type="button">歸零本月</button>
+          </div>
+        </section>
+
         <div class="field-group">
           <label class="field-label" for="ttsModelSelect">語音朗讀引擎（AI 真人唸出）</label>
           <select id="ttsModelSelect" class="select-control">
@@ -427,6 +487,6 @@
   <!-- Toast -->
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="./app.js?v=3.2"></script>
+  <script type="module" src="./app.js?v=3.3"></script>
 </body>
 </html>

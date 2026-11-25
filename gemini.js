@@ -7,6 +7,242 @@
 
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
+// ============================================================================
+// Official Gemini API Pricing & Usage Cost Engine (Nov 2026 verified rates,
+// including automatic scheduled rate changes on Dec 1, 2026 and Jan 1, 2027)
+// ============================================================================
+export const USD_TO_TWD = 32;
+
+export const MODEL_CATALOG_ORDER = [
+  'gemini-3.5-flash-lite',
+  'gemini-3.8-flash',
+  'gemini-4-hydrogen',
+  'gemini-4-carbon',
+  'gemini-4-argon',
+  'gemini-4-neon',
+  'gemini-3.8-live',
+];
+
+export function getModelPricing(modelId, now = new Date()) {
+  const id = String(modelId || 'gemini-3.5-flash-lite').trim();
+  const ts = now instanceof Date ? now.getTime() : Number(now) || Date.now();
+  const isDec2026OrLater = ts >= Date.UTC(2026, 11, 1); // 2026-12-01 UTC
+  const isJan2027OrLater = ts >= Date.UTC(2027, 0, 1);  // 2027-01-01 UTC
+
+  switch (id) {
+    case 'gemini-3.5-flash-lite':
+      return {
+        id,
+        label: '3.5 Flash-Lite',
+        tag: '最省・超快',
+        input: 0.30,
+        audioInput: 0.30,
+        cachedInput: 0.03,
+        output: 2.50,
+        baseInputTokPerMin: 3900,
+        baseOutputTokPerMin: 500,
+      };
+    case 'gemini-3.8-flash':
+      return {
+        id,
+        label: '3.8 Flash',
+        tag: '高速高精準',
+        input: isJan2027OrLater ? 1.50 : 0.75,
+        audioInput: isJan2027OrLater ? 1.50 : 0.75,
+        cachedInput: isJan2027OrLater ? 0.15 : 0.075,
+        output: isJan2027OrLater ? 7.50 : 3.75,
+        baseInputTokPerMin: 3900,
+        baseOutputTokPerMin: 780,
+      };
+    case 'gemini-4-hydrogen':
+      return {
+        id,
+        label: '4 Hydrogen',
+        tag: 'G4 主力',
+        input: 1.50,
+        audioInput: 1.50,
+        cachedInput: 0.075,
+        output: 7.50,
+        baseInputTokPerMin: 3900,
+        baseOutputTokPerMin: 700,
+      };
+    case 'gemini-4-neon':
+      return {
+        id,
+        label: '4 Neon',
+        tag: 'G4 旗艦',
+        input: 3.00,
+        audioInput: 3.00,
+        cachedInput: 0.15,
+        output: 15.00,
+        baseInputTokPerMin: 3900,
+        baseOutputTokPerMin: 760,
+      };
+    case 'gemini-4-carbon':
+      return {
+        id,
+        label: '4 Carbon',
+        tag: '頂級推理',
+        input: isDec2026OrLater ? 4.00 : 2.00,
+        audioInput: isDec2026OrLater ? 4.00 : 2.00,
+        cachedInput: isDec2026OrLater ? 0.20 : 0.10,
+        output: isDec2026OrLater ? 20.00 : 10.00,
+        baseInputTokPerMin: 3900,
+        baseOutputTokPerMin: 820,
+      };
+    case 'gemini-4-argon':
+      return {
+        id,
+        label: '4 Argon',
+        tag: '高階多模態',
+        input: isDec2026OrLater ? 4.00 : 2.00,
+        audioInput: isDec2026OrLater ? 4.00 : 2.00,
+        cachedInput: isDec2026OrLater ? 0.20 : 0.10,
+        output: isDec2026OrLater ? 20.00 : 10.00,
+        baseInputTokPerMin: 3900,
+        baseOutputTokPerMin: 820,
+      };
+    case 'gemini-3.8-live':
+    case 'gemini-3.1-flash-live-preview':
+      return {
+        id,
+        label: id === 'gemini-3.8-live' ? '3.8 Live' : '3.1 Live',
+        tag: '即時語音含朗讀',
+        isLive: true,
+        input: 0.75,
+        audioInput: 2.50,
+        cachedInput: 0.075,
+        output: 4.50,
+        audioOutput: 12.00,
+        fixedUsdPerHour: 1.38, // ~$0.005/min audio in + ~$0.018/min audio out
+        baseInputTokPerMin: 2000,
+        baseOutputTokPerMin: 1500,
+      };
+    case 'gemini-3.8-flash-lite-tts':
+      return {
+        id,
+        label: '3.8 Flash-Lite TTS',
+        tag: 'AI 朗讀',
+        input: 0.50,
+        output: 6.00,
+        audioOutput: 6.00,
+        fixedUsdPerHour: 0.54,
+      };
+    case 'gemini-3.8-flash-tts':
+      return {
+        id,
+        label: '3.8 Flash TTS',
+        tag: '旗艦朗讀',
+        input: isJan2027OrLater ? 1.00 : 0.50,
+        output: isJan2027OrLater ? 18.00 : 9.00,
+        audioOutput: isJan2027OrLater ? 18.00 : 9.00,
+        fixedUsdPerHour: isJan2027OrLater ? 1.62 : 0.81,
+      };
+    default:
+      return {
+        id,
+        label: id,
+        tag: '自訂模型',
+        input: 0.75,
+        audioInput: 0.75,
+        cachedInput: 0.075,
+        output: 3.75,
+        baseInputTokPerMin: 3900,
+        baseOutputTokPerMin: 680,
+      };
+  }
+}
+
+/**
+ * Estimate continuous voice interpretation cost per hour (in TWD) for a given model.
+ * Turbo mode splits slightly more often (~1.16x prompt frequency), reflected transparently.
+ */
+export function getModelHourlyCostTwd(modelId, { turbo = false, now = new Date() } = {}) {
+  const p = getModelPricing(modelId, now);
+  if (p.fixedUsdPerHour) {
+    return p.fixedUsdPerHour * USD_TO_TWD;
+  }
+  const turboMult = turbo ? 1.16 : 1.0;
+  const inPerHour = (p.baseInputTokPerMin || 3900) * 60 * turboMult;
+  const outPerHour = (p.baseOutputTokPerMin || 600) * 60 * (turbo ? 1.06 : 1.0);
+  const usdPerHour = (inPerHour * (p.audioInput ?? p.input) + outPerHour * p.output) / 1_000_000;
+  return Math.max(0.1, usdPerHour * USD_TO_TWD);
+}
+
+/**
+ * Calculate actual USD cost from a Gemini API `usageMetadata` object.
+ */
+export function calculateUsageCostUsd(modelId, usageMetadata, now = new Date()) {
+  if (!usageMetadata || typeof usageMetadata !== 'object') {
+    return { usd: 0, inputTokens: 0, outputTokens: 0, thinkingTokens: 0, totalTokens: 0 };
+  }
+  const p = getModelPricing(modelId, now);
+  const promptTotal = Math.max(0, Number(usageMetadata.promptTokenCount) || 0);
+  const cachedTokens = Math.max(0, Number(usageMetadata.cachedContentTokenCount) || 0);
+  const outputTokens = Math.max(
+    0,
+    Number(usageMetadata.candidatesTokenCount ?? usageMetadata.responseTokenCount) || 0
+  );
+  const thinkingTokens = Math.max(0, Number(usageMetadata.thoughtsTokenCount) || 0);
+
+  let audioIn = 0;
+  if (Array.isArray(usageMetadata.promptTokensDetails)) {
+    for (const d of usageMetadata.promptTokensDetails) {
+      if (String(d?.modality || '').toUpperCase() === 'AUDIO') {
+        audioIn += Math.max(0, Number(d.tokenCount) || 0);
+      }
+    }
+  }
+  const billablePrompt = Math.max(0, promptTotal - cachedTokens);
+  const billableAudioIn = Math.min(billablePrompt, audioIn);
+  const billableTextIn = Math.max(0, billablePrompt - billableAudioIn);
+
+  let audioOut = 0;
+  const outDetails = usageMetadata.candidatesTokensDetails || usageMetadata.responseTokensDetails;
+  if (Array.isArray(outDetails)) {
+    for (const d of outDetails) {
+      if (String(d?.modality || '').toUpperCase() === 'AUDIO') {
+        audioOut += Math.max(0, Number(d.tokenCount) || 0);
+      }
+    }
+  } else if (String(modelId || '').includes('-tts')) {
+    audioOut = outputTokens;
+  }
+  const textOut = Math.max(0, outputTokens - audioOut);
+
+  const audioInRate = p.audioInput ?? p.input;
+  const audioOutRate = p.audioOutput ?? p.output;
+  const cachedRate = p.cachedInput ?? p.input * 0.1;
+
+  const usd =
+    (billableTextIn * p.input +
+      billableAudioIn * audioInRate +
+      cachedTokens * cachedRate +
+      (textOut + thinkingTokens) * p.output +
+      audioOut * audioOutRate) /
+    1_000_000;
+
+  return {
+    usd,
+    inputTokens: promptTotal,
+    outputTokens,
+    thinkingTokens,
+    totalTokens: promptTotal + outputTokens + thinkingTokens,
+  };
+}
+
+let usageObserver = null;
+export function setUsageObserver(fn) {
+  usageObserver = typeof fn === 'function' ? fn : null;
+}
+
+function notifyUsage(model, usageMetadata) {
+  if (!usageObserver || !usageMetadata) return;
+  try {
+    usageObserver({ model, usageMetadata });
+  } catch (_) {}
+}
+
 export const TARGET_LANGUAGES = {
   en: {
     code: 'en',
@@ -159,7 +395,11 @@ async function postGenerateContent(apiKey, model, payload, signal, timeoutMs = 2
     throw friendlyApiError(resp.status, text);
   }
 
-  return resp.json();
+  const data = await resp.json();
+  if (data && data.usageMetadata) {
+    notifyUsage(model, data.usageMetadata);
+  }
+  return data;
 }
 
 async function postStreamGenerateContent(apiKey, model, payload, onPartialText, signal, timeoutMs = 24000) {
@@ -189,6 +429,9 @@ async function postStreamGenerateContent(apiKey, model, payload, onPartialText, 
 
   if (!resp.body || !resp.body.getReader) {
     const data = await resp.json();
+    if (data && data.usageMetadata) {
+      notifyUsage(model, data.usageMetadata);
+    }
     const txt = extractTextPart(data);
     if (onPartialText && txt) onPartialText(txt);
     return txt;
@@ -198,6 +441,7 @@ async function postStreamGenerateContent(apiKey, model, payload, onPartialText, 
   const decoder = new TextDecoder('utf-8');
   let sseBuffer = '';
   let fullText = '';
+  let lastUsage = null;
 
   const processLine = (line) => {
     const trimmed = line.trim();
@@ -206,6 +450,9 @@ async function postStreamGenerateContent(apiKey, model, payload, onPartialText, 
     if (!jsonStr || jsonStr === '[DONE]') return;
     try {
       const chunk = JSON.parse(jsonStr);
+      if (chunk && chunk.usageMetadata) {
+        lastUsage = chunk.usageMetadata;
+      }
       const parts = chunk?.candidates?.[0]?.content?.parts || [];
       let delta = '';
       for (const p of parts) {
@@ -237,6 +484,10 @@ async function postStreamGenerateContent(apiKey, model, payload, onPartialText, 
     for (const line of sseBuffer.split(/\r?\n/)) {
       processLine(line);
     }
+  }
+
+  if (lastUsage) {
+    notifyUsage(model, lastUsage);
   }
 
   return fullText.trim();

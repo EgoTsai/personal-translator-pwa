@@ -2,8 +2,14 @@
  * app.js — Main UI controller for 隨身口譯官 PWA
  */
 
-import { AudioEngine } from './audio.js?v=3.2';
+import { AudioEngine } from './audio.js?v=3.3';
 import {
+  USD_TO_TWD,
+  MODEL_CATALOG_ORDER,
+  getModelPricing,
+  getModelHourlyCostTwd,
+  calculateUsageCostUsd,
+  setUsageObserver,
   TARGET_LANGUAGES,
   ICEBREAKER_BANNERS,
   interpretDialogueAudio,
@@ -13,8 +19,8 @@ import {
   translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
-} from './gemini.js?v=3.2';
-import { GeminiLiveClient } from './live.js?v=3.2';
+} from './gemini.js?v=3.3';
+import { GeminiLiveClient } from './live.js?v=3.3';
 
 const STORAGE_KEYS = {
   settings: 'pt_settings_v1',
@@ -22,6 +28,7 @@ const STORAGE_KEYS = {
   speakers: 'pt_speakers_v1',
   broadcast: 'pt_broadcast_v1',
   phraseCache: 'pt_phrase_cache_v1',
+  usage: 'pt_usage_v1',
 };
 
 const DEFAULT_SETTINGS = {
@@ -30,6 +37,7 @@ const DEFAULT_SETTINGS = {
   model: 'gemini-3.5-flash-lite',
   liveModel: 'gemini-3.8-live',
   ttsModel: 'gemini-3.8-flash-lite-tts',
+  monthlyBudgetTwd: 300,
   voiceName: 'Kore',
   tone: 'natural',
   glossary: '',
@@ -244,6 +252,7 @@ const els = {
   topHeader: $('topHeader'),
   statusDot: $('statusDot'),
   statusText: $('statusText'),
+  quotaHeaderPill: $('quotaHeaderPill'),
   turboBtn: $('turboBtn'),
   toneQuickBtn: $('toneQuickBtn'),
   themeBtn: $('themeBtn'),
@@ -298,6 +307,17 @@ const els = {
   testKeyBtn: $('testKeyBtn'),
   testResult: $('testResult'),
   modelSelect: $('modelSelect'),
+  quotaSection: $('quotaSection'),
+  quotaBigTime: $('quotaBigTime'),
+  quotaActiveModelTag: $('quotaActiveModelTag'),
+  quotaMonthBadge: $('quotaMonthBadge'),
+  quotaProgressFill: $('quotaProgressFill'),
+  quotaSummaryText: $('quotaSummaryText'),
+  quotaModelList: $('quotaModelList'),
+  budgetTwdInput: $('budgetTwdInput'),
+  calibrateSpentInput: $('calibrateSpentInput'),
+  calibrateSpentBtn: $('calibrateSpentBtn'),
+  resetUsageBtn: $('resetUsageBtn'),
   useLiveInDialogueCheck: $('useLiveInDialogueCheck'),
   liveModelSelect: $('liveModelSelect'),
   ttsModelSelect: $('ttsModelSelect'),
@@ -589,39 +609,292 @@ function syncViewModeUI() {
   syncViewportMetrics();
 }
 
+// ============================================================================
+// Monthly Quota & Per-Model Remaining Time Estimator (Token-Accurate + Auto-Reset)
+// ============================================================================
+function getCurrentMonthKey(now = new Date()) {
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  return `${y}-${m}`;
+}
+
+function createEmptyUsageState(monthKey = getCurrentMonthKey()) {
+  return {
+    monthKey,
+    spentTwd: 0,
+    manualOffsetTwd: 0,
+    totalRequests: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    byModel: {},
+  };
+}
+
+let usageState = (() => {
+  const key = getCurrentMonthKey();
+  const saved = loadJson(STORAGE_KEYS.usage, null);
+  if (!saved || saved.monthKey !== key) {
+    return createEmptyUsageState(key);
+  }
+  return {
+    ...createEmptyUsageState(key),
+    ...saved,
+    spentTwd: Math.max(0, Number(saved.spentTwd) || 0),
+    manualOffsetTwd: Number(saved.manualOffsetTwd) || 0,
+    totalRequests: Math.max(0, Number(saved.totalRequests) || 0),
+    totalInputTokens: Math.max(0, Number(saved.totalInputTokens) || 0),
+    totalOutputTokens: Math.max(0, Number(saved.totalOutputTokens) || 0),
+    byModel: saved.byModel && typeof saved.byModel === 'object' ? saved.byModel : {},
+  };
+})();
+
+function ensureCurrentMonthUsage() {
+  const key = getCurrentMonthKey();
+  if (usageState.monthKey !== key) {
+    usageState = createEmptyUsageState(key);
+    saveUsageState();
+  }
+}
+
+function saveUsageState() {
+  try {
+    localStorage.setItem(STORAGE_KEYS.usage, JSON.stringify(usageState));
+  } catch (_) {}
+}
+
+function getMonthlyBudgetTwd(overrideVal = null) {
+  const raw = overrideVal !== null ? Number(overrideVal) : Number(settings.monthlyBudgetTwd);
+  if (!Number.isFinite(raw) || raw < 10) return DEFAULT_SETTINGS.monthlyBudgetTwd;
+  return Math.min(100000, Math.round(raw));
+}
+
+function getEffectiveQuotaModel({ previewForm = false } = {}) {
+  if (previewForm && els.modelSelect) {
+    const wantsLive = Boolean(els.useLiveInDialogueCheck && els.useLiveInDialogueCheck.checked);
+    if (wantsLive) {
+      return (els.liveModelSelect && els.liveModelSelect.value) || settings.liveModel || 'gemini-3.8-live';
+    }
+    return els.modelSelect.value || settings.model || 'gemini-3.5-flash-lite';
+  }
+  if ((activeMode === 'dialogue' && isLiveActive) || (viewMode === 'dialogue' && settings.useLiveInDialogue)) {
+    return settings.liveModel || 'gemini-3.8-live';
+  }
+  return settings.model || 'gemini-3.5-flash-lite';
+}
+
+export function formatRemainingTime(minutes, { compact = false } = {}) {
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    return compact ? '額度已滿' : '已達預算上限';
+  }
+  if (minutes < 1) {
+    return compact ? '剩<1分' : '不到 1 分鐘';
+  }
+  if (minutes < 60) {
+    const m = Math.round(minutes);
+    return compact ? `剩約 ${m}分` : `約 ${m} 分鐘`;
+  }
+  const hrs = minutes / 60;
+  if (hrs < 10) {
+    const hStr = hrs.toFixed(1).replace(/\.0$/, '');
+    return compact ? `剩約 ${hStr}h` : `約 ${hStr} 小時`;
+  }
+  const hInt = Math.round(hrs);
+  return compact ? `剩約 ${hInt}h` : `約 ${hInt} 小時`;
+}
+
+function getMonthlyUsageSummary(budgetOverride = null) {
+  ensureCurrentMonthUsage();
+  const budgetTwd = getMonthlyBudgetTwd(budgetOverride);
+  const spentTwd = Math.max(0, (Number(usageState.spentTwd) || 0) + (Number(usageState.manualOffsetTwd) || 0));
+  const remainingTwd = Math.max(0, budgetTwd - spentTwd);
+  const usedRatio = budgetTwd > 0 ? Math.min(1, spentTwd / budgetTwd) : 1;
+  const severity = usedRatio >= 0.9 ? 'critical' : usedRatio >= 0.75 ? 'warn' : 'ok';
+  return {
+    monthKey: usageState.monthKey,
+    budgetTwd,
+    spentTwd,
+    remainingTwd,
+    usedRatio,
+    totalRequests: usageState.totalRequests || 0,
+    severity,
+  };
+}
+
+function estimateModelRemainingMinutes(modelId, remainingTwd, { turbo = Boolean(settings.turboMode) } = {}) {
+  const hourlyTwd = getModelHourlyCostTwd(modelId, { turbo });
+  if (hourlyTwd <= 0 || remainingTwd <= 0) return { minutes: 0, hourlyTwd };
+  return {
+    minutes: (remainingTwd / hourlyTwd) * 60,
+    hourlyTwd,
+  };
+}
+
+export function recordApiUsage({ model, usageMetadata } = {}) {
+  if (!usageMetadata || !model) return;
+  ensureCurrentMonthUsage();
+  const stats = calculateUsageCostUsd(model, usageMetadata);
+  if (stats.totalTokens <= 0 && stats.usd <= 0) return;
+
+  const deltaTwd = stats.usd * USD_TO_TWD;
+  usageState.spentTwd = Math.max(0, (Number(usageState.spentTwd) || 0) + deltaTwd);
+  usageState.totalRequests = (Number(usageState.totalRequests) || 0) + 1;
+  usageState.totalInputTokens = (Number(usageState.totalInputTokens) || 0) + stats.inputTokens;
+  usageState.totalOutputTokens = (Number(usageState.totalOutputTokens) || 0) + stats.outputTokens + stats.thinkingTokens;
+
+  if (!usageState.byModel[model]) {
+    usageState.byModel[model] = { spentTwd: 0, requests: 0 };
+  }
+  usageState.byModel[model].spentTwd += deltaTwd;
+  usageState.byModel[model].requests += 1;
+
+  saveUsageState();
+  const sheetOpen = Boolean(els.settingsSheet && els.settingsSheet.classList.contains('open'));
+  renderQuotaUI({ previewForm: sheetOpen });
+}
+
+function renderQuotaHeaderPill() {
+  if (!els.quotaHeaderPill) return;
+  const activeModel = getEffectiveQuotaModel({ previewForm: false });
+  const summary = getMonthlyUsageSummary();
+  const pricing = getModelPricing(activeModel);
+  const { minutes, hourlyTwd } = estimateModelRemainingMinutes(activeModel, summary.remainingTwd);
+
+  els.quotaHeaderPill.textContent = formatRemainingTime(minutes, { compact: true });
+  els.quotaHeaderPill.classList.toggle('warn', summary.severity === 'warn');
+  els.quotaHeaderPill.classList.toggle('critical', summary.severity === 'critical');
+  els.quotaHeaderPill.title =
+    `${pricing.label}${settings.turboMode && !pricing.isLive ? ' (Turbo)' : ''}：` +
+    `約 NT$${hourlyTwd.toFixed(1)}/小時｜本月剩餘約 NT$${summary.remainingTwd.toFixed(1)} / NT$${summary.budgetTwd}（點擊查看各模型對照）`;
+}
+
+function renderQuotaUI({ previewForm = false } = {}) {
+  renderQuotaHeaderPill();
+
+  const budgetOverride =
+    previewForm && els.budgetTwdInput && els.budgetTwdInput.value !== ''
+      ? Number(els.budgetTwdInput.value)
+      : null;
+  const summary = getMonthlyUsageSummary(budgetOverride);
+  const activeModel = getEffectiveQuotaModel({ previewForm });
+  const activePricing = getModelPricing(activeModel);
+  const activeEst = estimateModelRemainingMinutes(activeModel, summary.remainingTwd);
+
+  if (els.quotaBigTime) {
+    els.quotaBigTime.textContent = formatRemainingTime(activeEst.minutes, { compact: false });
+    els.quotaBigTime.classList.toggle('warn', summary.severity === 'warn');
+    els.quotaBigTime.classList.toggle('critical', summary.severity === 'critical');
+  }
+  if (els.quotaActiveModelTag) {
+    els.quotaActiveModelTag.textContent =
+      activePricing.label + (settings.turboMode && !activePricing.isLive ? ' · Turbo' : '');
+  }
+  if (els.quotaMonthBadge) {
+    const parts = summary.monthKey.split('-');
+    const monthNum = parts[1] ? Number(parts[1]) : new Date().getMonth() + 1;
+    els.quotaMonthBadge.textContent = `${monthNum} 月預算`;
+  }
+  if (els.quotaProgressFill) {
+    els.quotaProgressFill.style.width = `${Math.min(100, Math.round(summary.usedRatio * 1000) / 10)}%`;
+    els.quotaProgressFill.classList.toggle('warn', summary.severity === 'warn');
+    els.quotaProgressFill.classList.toggle('critical', summary.severity === 'critical');
+  }
+  if (els.quotaSummaryText) {
+    els.quotaSummaryText.textContent =
+      `本月累計約 NT$${summary.spentTwd.toFixed(1)} / NT$${summary.budgetTwd}（剩 NT$${summary.remainingTwd.toFixed(1)}・${summary.totalRequests} 次呼叫）`;
+  }
+
+  if (els.quotaModelList) {
+    els.quotaModelList.textContent = '';
+    const frag = document.createDocumentFragment();
+    for (const modelId of MODEL_CATALOG_ORDER) {
+      const p = getModelPricing(modelId);
+      const est = estimateModelRemainingMinutes(modelId, summary.remainingTwd);
+      const isSelected =
+        modelId === activeModel ||
+        (p.isLive && activePricing.isLive);
+
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = `quota-model-row${isSelected ? ' active' : ''}`;
+      row.dataset.quotaModel = modelId;
+
+      const left = document.createElement('span');
+      left.className = 'quota-model-left';
+      const nameEl = document.createElement('span');
+      nameEl.className = 'quota-model-name';
+      nameEl.textContent = p.label;
+      const tagEl = document.createElement('span');
+      tagEl.className = 'quota-model-tag';
+      tagEl.textContent = p.tag;
+      left.appendChild(nameEl);
+      left.appendChild(tagEl);
+
+      const right = document.createElement('span');
+      right.className = 'quota-model-right';
+      const rateEl = document.createElement('span');
+      rateEl.className = 'quota-model-rate';
+      rateEl.textContent = `~NT$${est.hourlyTwd < 10 ? est.hourlyTwd.toFixed(1) : Math.round(est.hourlyTwd)}/h`;
+      const etaEl = document.createElement('span');
+      etaEl.className = 'quota-model-eta';
+      etaEl.textContent = formatRemainingTime(est.minutes, { compact: true }).replace(/^剩/, '');
+      right.appendChild(rateEl);
+      right.appendChild(etaEl);
+
+      row.appendChild(left);
+      row.appendChild(right);
+
+      row.addEventListener('click', () => {
+        haptic(8);
+        if (p.isLive) {
+          if (els.useLiveInDialogueCheck) els.useLiveInDialogueCheck.checked = true;
+          if (els.liveModelSelect) els.liveModelSelect.value = modelId;
+        } else {
+          if (els.useLiveInDialogueCheck) els.useLiveInDialogueCheck.checked = false;
+          if (els.modelSelect) els.modelSelect.value = modelId;
+        }
+        renderQuotaUI({ previewForm: true });
+      });
+
+      frag.appendChild(row);
+    }
+    els.quotaModelList.appendChild(frag);
+  }
+}
+
 function updateHeaderStatus() {
   els.statusDot.className = 'status-dot';
+  renderQuotaHeaderPill();
   if (!isOnline) {
     els.statusDot.classList.add('offline');
-    els.statusText.textContent = '離線中・等待網路恢復';
+    els.statusText.textContent = '離線中';
     return;
   }
   if (audio.playingId) {
     els.statusDot.classList.add('speaking');
-    els.statusText.textContent = 'AI 真人朗讀中⋯';
+    els.statusText.textContent = 'AI 朗讀中⋯';
     return;
   }
   if (isManualRecording) {
     els.statusDot.classList.add('listening');
-    els.statusText.textContent = '正在收錄語音⋯';
+    els.statusText.textContent = '收音中⋯';
     return;
   }
   if (activeMode === 'dialogue' && isLiveActive) {
     if (liveConnecting) {
       els.statusDot.classList.add('processing');
-      els.statusText.textContent = '⚡ Live 串流連線中⋯';
+      els.statusText.textContent = '⚡ Live 連線中';
     } else if (liveConnected) {
       els.statusDot.classList.add('live-ws');
-      els.statusText.textContent = '⚡ Live 雙向對話・螢幕恆亮';
+      els.statusText.textContent = '⚡ Live 對話';
     } else {
       els.statusDot.classList.add('processing');
-      els.statusText.textContent = '⚡ Live 準備中⋯';
+      els.statusText.textContent = '⚡ Live 準備中';
     }
     return;
   }
   if (bcPolishBusy) {
     els.statusDot.classList.add('processing');
-    els.statusText.textContent = '✨ 正在回頭潤飾中文語意⋯';
+    els.statusText.textContent = '✨ 潤飾語意中';
     return;
   }
   const totalPending = pendingCount + broadcastPendingCount;
@@ -629,9 +902,9 @@ function updateHeaderStatus() {
     els.statusDot.classList.add('processing');
     if (settings.turboMode && !turboThrottled) {
       els.statusText.textContent =
-        totalPending > 1 ? `⚡ Turbo 並行快翻 (${totalPending})⋯` : '⚡ Turbo 極速翻譯中⋯';
+        totalPending > 1 ? `⚡ 並行快翻 (${totalPending})` : '⚡ 極速翻譯中';
     } else {
-      els.statusText.textContent = `Gemini 串流翻譯中 (${totalPending})⋯`;
+      els.statusText.textContent = `串流翻譯中 (${totalPending})`;
     }
     return;
   }
@@ -639,27 +912,27 @@ function updateHeaderStatus() {
     els.statusDot.classList.add('dialogue');
     els.statusText.textContent = settings.turboMode
       ? turboThrottled
-        ? '💬 對話中・2x額度保護'
-        : '⚡ 對話極速中・螢幕恆亮'
-      : '💬 自動對話中・螢幕恆亮';
+        ? '💬 對話・2x保護'
+        : '⚡ 極速對話中'
+      : '💬 自動對話中';
     return;
   }
   if (activeMode === 'broadcast') {
     els.statusDot.classList.add('listening');
     els.statusText.textContent = settings.turboMode
       ? turboThrottled
-        ? '📻 純中文連翻・2x保護'
-        : '⚡ 純中文極速連翻・螢幕恆亮'
-      : '📻 純中文連翻中・螢幕恆亮';
+        ? '📻 連翻・2x保護'
+        : '⚡ 極速連翻中'
+      : '📻 純中文連翻';
     return;
   }
   els.statusDot.classList.add('ready');
   if (!settings.apiKey) {
-    els.statusText.textContent = '尚未設定 API Key';
+    els.statusText.textContent = '未設 Key';
   } else if (viewMode === 'broadcast') {
-    els.statusText.textContent = '聆聽翻譯已暫停・純中文閱讀';
+    els.statusText.textContent = '聆聽已暫停';
   } else {
-    els.statusText.textContent = settings.turboMode ? '待命中・⚡ Turbo (≤2x)' : '待命中・標準省額度';
+    els.statusText.textContent = settings.turboMode ? '⚡ Turbo 待命' : '待命中';
   }
 }
 
@@ -1698,6 +1971,10 @@ liveClient.onGoAway = () => {
     const epoch = ++sessionEpoch;
     startLiveSession({ resume: true, epoch }).catch(() => {});
   }
+};
+
+liveClient.onUsage = (evt) => {
+  recordApiUsage(evt);
 };
 
 async function startLiveSession({ resume = false, epoch = sessionEpoch } = {}) {
@@ -3143,7 +3420,7 @@ function closeShowcard() {
 }
 
 // Settings Sheet
-function openSettings() {
+function openSettings({ focusQuota = false } = {}) {
   els.apiKeyInput.value = settings.apiKey;
   els.modelSelect.value = settings.model;
   if (els.useLiveInDialogueCheck) {
@@ -3151,6 +3428,12 @@ function openSettings() {
   }
   if (els.liveModelSelect) {
     els.liveModelSelect.value = settings.liveModel || 'gemini-3.8-live';
+  }
+  if (els.budgetTwdInput) {
+    els.budgetTwdInput.value = String(getMonthlyBudgetTwd());
+  }
+  if (els.calibrateSpentInput) {
+    els.calibrateSpentInput.value = '';
   }
   els.ttsModelSelect.value = settings.ttsModel;
   els.voiceSelect.value = settings.voiceName;
@@ -3165,8 +3448,16 @@ function openSettings() {
   els.showOriginalCheck.checked = settings.showOriginal;
   els.testResult.textContent = '';
   els.testResult.className = 'test-result';
+  renderQuotaUI({ previewForm: true });
   els.settingsSheet.classList.add('open');
   els.settingsSheet.setAttribute('aria-hidden', 'false');
+  if (focusQuota && els.quotaSection && typeof els.quotaSection.scrollIntoView === 'function') {
+    setTimeout(() => {
+      try {
+        els.quotaSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } catch (_) {}
+    }, 140);
+  }
 }
 
 function closeSettings() {
@@ -3175,6 +3466,7 @@ function closeSettings() {
   if (els.toggleKeyVisibility) els.toggleKeyVisibility.textContent = '顯示';
   els.settingsSheet.classList.remove('open');
   els.settingsSheet.setAttribute('aria-hidden', 'true');
+  renderQuotaUI();
 }
 
 function saveSettingsFromForm() {
@@ -3189,6 +3481,12 @@ function saveSettingsFromForm() {
   settings.model = els.modelSelect.value;
   if (els.useLiveInDialogueCheck) settings.useLiveInDialogue = els.useLiveInDialogueCheck.checked;
   if (els.liveModelSelect) settings.liveModel = els.liveModelSelect.value;
+  if (els.budgetTwdInput) {
+    const parsedBudget = Number(els.budgetTwdInput.value);
+    if (Number.isFinite(parsedBudget) && parsedBudget >= 10) {
+      settings.monthlyBudgetTwd = Math.min(100000, Math.round(parsedBudget));
+    }
+  }
   settings.ttsModel = els.ttsModelSelect.value;
   settings.voiceName = els.voiceSelect.value;
   settings.tone = els.toneSelect.value;
@@ -3254,6 +3552,7 @@ function saveSettingsFromForm() {
   saveState();
   applyTheme();
   updateSwitchUI();
+  renderQuotaUI();
   closeSettings();
   showToast('設定已儲存於本機');
 }
@@ -3855,6 +4154,52 @@ if (window.visualViewport) {
   window.visualViewport.addEventListener('scroll', syncViewportMetrics);
 }
 
+// Quota Pill & Settings Quota Dashboard Wiring
+if (els.quotaHeaderPill) {
+  els.quotaHeaderPill.addEventListener('click', () => {
+    haptic(8);
+    openSettings({ focusQuota: true });
+  });
+}
+
+const syncQuotaSettingsPreview = () => renderQuotaUI({ previewForm: true });
+if (els.modelSelect) els.modelSelect.addEventListener('change', syncQuotaSettingsPreview);
+if (els.liveModelSelect) els.liveModelSelect.addEventListener('change', syncQuotaSettingsPreview);
+if (els.useLiveInDialogueCheck) els.useLiveInDialogueCheck.addEventListener('change', syncQuotaSettingsPreview);
+if (els.budgetTwdInput) els.budgetTwdInput.addEventListener('input', syncQuotaSettingsPreview);
+
+if (els.calibrateSpentBtn) {
+  els.calibrateSpentBtn.addEventListener('click', () => {
+    const raw = els.calibrateSpentInput ? Number(els.calibrateSpentInput.value) : NaN;
+    if (!Number.isFinite(raw) || raw < 0) {
+      showToast('請輸入有效的已使用金額（NT$）');
+      return;
+    }
+    ensureCurrentMonthUsage();
+    const targetSpent = Math.min(100000, Math.max(0, raw));
+    usageState.manualOffsetTwd = targetSpent - usageState.spentTwd;
+    saveUsageState();
+    if (els.calibrateSpentInput) els.calibrateSpentInput.value = '';
+    haptic(10);
+    renderQuotaUI({ previewForm: true });
+    showToast(`已校準本月累計花費為 NT$${targetSpent.toFixed(1)}`);
+  });
+}
+
+if (els.resetUsageBtn) {
+  els.resetUsageBtn.addEventListener('click', () => {
+    usageState = createEmptyUsageState(getCurrentMonthKey());
+    saveUsageState();
+    if (els.calibrateSpentInput) els.calibrateSpentInput.value = '';
+    haptic(10);
+    renderQuotaUI({ previewForm: true });
+    showToast('已歸零本月 API 累計紀錄');
+  });
+}
+
+// Register real-time Gemini token usage observer (REST + SSE + TTS)
+setUsageObserver(recordApiUsage);
+
 // Init
 syncViewportMetrics();
 requestAnimationFrame(syncViewportMetrics);
@@ -3863,5 +4208,6 @@ setTimeout(syncViewportMetrics, 400);
 applyActiveAudioProfile();
 applyTheme();
 updateSwitchUI();
+renderQuotaUI();
 renderFeed();
 renderBroadcastCanvas(true);

@@ -5,8 +5,8 @@
  * and 24kHz PCM audio caching.
  */
 
-import { TARGET_LANGUAGES, TONE_PRESETS, formatGlossaryLine } from './gemini.js?v=3.2';
-import { uint8ToBase64, base64ToUint8 } from './audio.js?v=3.2';
+import { TARGET_LANGUAGES, TONE_PRESETS, formatGlossaryLine } from './gemini.js?v=3.3';
+import { uint8ToBase64, base64ToUint8 } from './audio.js?v=3.3';
 
 const LIVE_WS_ENDPOINT =
   'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
@@ -42,6 +42,7 @@ export class GeminiLiveClient {
     this.turnAudioChunks = []; // Uint8Array[] of 24kHz 16-bit LE PCM
     this.turnSampleRate = 24000;
     this.lastActivityTs = 0;
+    this._lastUsageTotals = null;
 
     // Callbacks
     this.onStateChange = null; // (state: 'connecting'|'ready'|'closed'|'error', detail?: string)
@@ -49,6 +50,7 @@ export class GeminiLiveClient {
     this.onAudioChunk = null; // (uint8Bytes, sampleRate) — for optional real-time playback
     this.onTurnComplete = null; // ({ inputText, outputText, pcmChunks, sampleRate })
     this.onGoAway = null; // (timeLeft)
+    this.onUsage = null; // ({ model, usageMetadata })
   }
 
   connect({
@@ -69,6 +71,7 @@ export class GeminiLiveClient {
 
     this.intentionalClose = false;
     this.model = model || 'gemini-3.8-live';
+    this._lastUsageTotals = null;
     this._resetTurnState();
 
     const wsUrl = `${LIVE_WS_ENDPOINT}?key=${encodeURIComponent(apiKey.trim())}`;
@@ -317,6 +320,36 @@ export class GeminiLiveClient {
         this.onGoAway(msg.goAway.timeLeft || '');
       }
       return;
+    }
+
+    if (msg.usageMetadata && this.onUsage) {
+      const um = msg.usageMetadata;
+      const curPrompt = Math.max(0, Number(um.promptTokenCount) || 0);
+      const curOut = Math.max(0, Number(um.responseTokenCount ?? um.candidatesTokenCount) || 0);
+      const curThink = Math.max(0, Number(um.thoughtsTokenCount) || 0);
+      const prev = this._lastUsageTotals;
+      const isCumulative =
+        prev &&
+        curPrompt >= prev.prompt &&
+        curOut >= prev.out &&
+        curThink >= prev.think &&
+        (curPrompt > prev.prompt || curOut > prev.out || curThink > prev.think);
+      const deltaPrompt = isCumulative ? curPrompt - prev.prompt : curPrompt;
+      const deltaOut = isCumulative ? curOut - prev.out : curOut;
+      const deltaThink = isCumulative ? curThink - prev.think : curThink;
+      this._lastUsageTotals = { prompt: curPrompt, out: curOut, think: curThink };
+      if (deltaPrompt > 0 || deltaOut > 0 || deltaThink > 0) {
+        this.onUsage({
+          model: this.model,
+          usageMetadata: {
+            promptTokenCount: deltaPrompt,
+            responseTokenCount: deltaOut,
+            thoughtsTokenCount: deltaThink,
+            promptTokensDetails: isCumulative ? undefined : um.promptTokensDetails,
+            responseTokensDetails: isCumulative ? undefined : (um.responseTokensDetails || um.candidatesTokensDetails),
+          },
+        });
+      }
     }
 
     const sc = msg.serverContent;
