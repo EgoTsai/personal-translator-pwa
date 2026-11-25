@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
   <meta
     http-equiv="Content-Security-Policy"
-    content="default-src 'self'; script-src 'self' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' https://generativelanguage.googleapis.com wss://generativelanguage.googleapis.com; object-src 'none'; base-uri 'self'; form-action 'none';"
+    content="default-src 'self'; script-src 'self' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' https://generativelanguage.googleapis.com wss://generativelanguage.googleapis.com https://script.google.com https://script.googleusercontent.com; object-src 'none'; base-uri 'self'; form-action 'none';"
   />
   <meta name="referrer" content="strict-origin-when-cross-origin" />
   <title>隨身口譯官 — 英・日・瑞典 ↔ 中文專屬語音翻譯</title>
@@ -21,7 +21,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=3.3" />
+  <link rel="stylesheet" href="./styles.css?v=3.4" />
 </head>
 <body>
   <div class="app-shell" id="appShell">
@@ -33,7 +33,7 @@
           <div class="brand-text">
             <div class="brand-title-row" style="display:flex;align-items:center;gap:5px;white-space:nowrap;">
               <h1 class="brand-title">隨身口譯官</h1>
-              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v3.3</button>
+              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v3.4</button>
             </div>
             <div class="status-line">
               <span class="status-dot ready" id="statusDot"></span>
@@ -172,6 +172,7 @@
           <div class="broadcast-tools">
             <button class="bc-tool-btn" id="bcFontBtn" type="button" title="切換閱讀字體大小">字級 中</button>
             <button class="bc-tool-btn" id="bcPolishBtn" type="button" title="回頭潤飾目前段落語意">✨ 潤飾</button>
+            <button class="bc-tool-btn primary-doc" id="bcDriveBtn" type="button" title="將中英文存成 Google Doc 上傳至 Drive">存 Doc</button>
             <button class="bc-tool-btn" id="bcCopyBtn" type="button" title="複製整篇中文譯文">複製</button>
             <button class="bc-tool-btn danger" id="bcClearBtn" type="button" title="一鍵清除聆聽譯文，從頭開始">清除</button>
           </div>
@@ -180,13 +181,14 @@
           <div class="broadcast-empty" id="broadcastEmpty">
             <div class="empty-icon broadcast-empty-icon" aria-hidden="true">📻</div>
             <h2 class="empty-title">全畫面連續中文聆聽翻譯</h2>
-            <p class="empty-desc">只顯示流暢繁體中文，不夾雜英文割裂視線。每聽到後續新句子時，系統會自動回頭修改前段語序與語意。</p>
+            <p class="empty-desc">只顯示流暢繁體中文，不夾雜英文割裂視線。背景會同步保留英文原話，聽完可一鍵存成中英對照 Google Doc 到雲端硬碟。</p>
             <button class="demo-btn" id="bcDemoBtn" type="button">體驗連翻與回頭潤飾效果</button>
           </div>
         </div>
         <div class="broadcast-paused-bar" id="broadcastPausedBar">
-          <button class="bc-resume-btn" id="bcResumeBtn" type="button">📻 繼續聆聽翻譯</button>
-          <button class="bc-back-btn" id="bcBackToChatBtn" type="button">💬 返回對話</button>
+          <button class="bc-resume-btn" id="bcResumeBtn" type="button">📻 繼續</button>
+          <button class="bc-drive-btn" id="bcPausedDriveBtn" type="button">📄 存 Google Doc</button>
+          <button class="bc-back-btn" id="bcBackToChatBtn" type="button">💬 對話</button>
         </div>
       </section>
     </div>
@@ -457,12 +459,152 @@
           <input type="checkbox" id="showOriginalCheck" checked />
         </label>
 
+        <!-- Personal Google Drive / Google Docs Bridge (Apps Script) -->
+        <section class="drive-setup-card" id="driveSettingsSection" aria-label="Google Drive 一鍵存成 Google Doc 設定">
+          <div class="drive-setup-head">
+            <div>
+              <strong class="drive-setup-title">☁️ 存成 Google Doc 到 Drive</strong>
+              <span class="field-hint">私人 Apps Script 橋接：一次設定 2 分鐘，之後永遠 1 鍵直傳免重登</span>
+            </div>
+            <span class="drive-status-badge" id="driveSetupBadge">未設定</span>
+          </div>
+
+          <div class="drive-grid-row">
+            <div class="quota-control-box">
+              <label class="quota-mini-label" for="driveFolderInput">存入資料夾名稱</label>
+              <input
+                type="text"
+                id="driveFolderInput"
+                class="text-control quota-num-input"
+                placeholder="隨身口譯官"
+                value="隨身口譯官"
+                maxlength="60"
+              />
+            </div>
+            <div class="quota-control-box">
+              <label class="quota-mini-label" for="driveSecretDisplay">
+                <span>私人密鑰（本機產生）</span>
+                <button type="button" class="inline-text-link" id="regenDriveSecretBtn">重產</button>
+              </label>
+              <input
+                type="password"
+                id="driveSecretDisplay"
+                class="text-control quota-num-input"
+                readonly
+                autocomplete="off"
+              />
+            </div>
+          </div>
+
+          <button class="btn-secondary drive-copy-script-btn" id="copyAppsScriptBtn" type="button">
+            📋 複製專屬 Apps Script 程式碼（已自動填入密鑰）
+          </button>
+
+          <details class="guide-details">
+            <summary>2 分鐘完成設定步驟（首次設定一次即可）</summary>
+            <ol>
+              <li>點上方 <strong>📋 複製專屬 Apps Script 程式碼</strong>。</li>
+              <li>在電腦或手機打開 <a href="https://script.new" target="_blank" rel="noopener noreferrer">script.new</a>，全選覆蓋貼上程式碼並按儲存。</li>
+              <li>點右上角 <strong>部署 → 新增部署作業</strong> → 類型選 <strong>網頁應用程式</strong> → 執行身分選「<strong>我</strong>」、誰可以存取選「<strong>所有人</strong>」→ 按「部署」並完成 Google 授權。</li>
+              <li>複製「網頁應用程式網址」（<code>https://script.google.com/macros/s/.../exec</code>）貼到下方欄位，按「測試連線」即完成！</li>
+            </ol>
+          </details>
+
+          <div class="field-group" style="gap:5px;">
+            <label class="quota-mini-label" for="driveWebhookInput">Apps Script 網頁應用程式網址</label>
+            <div class="input-row">
+              <input
+                type="url"
+                id="driveWebhookInput"
+                class="text-control"
+                placeholder="https://script.google.com/macros/s/.../exec"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <button class="btn-secondary" id="testDriveBtn" type="button">測試連線</button>
+            </div>
+            <div class="test-result" id="driveTestResult"></div>
+          </div>
+        </section>
+
         <div class="input-row">
           <button class="btn-secondary" id="themeBtn" type="button" style="flex:1;">切換深淺主題</button>
           <button class="btn-secondary" id="exportBtn" type="button" style="flex:1;">匯出對話紀錄</button>
         </div>
 
         <button class="btn-primary" id="saveSettingsBtn" type="button">儲存設定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Google Doc Export Bottom Sheet (1-Tap Bilingual News Briefing -> Drive) -->
+  <div class="sheet-backdrop" id="driveExportSheet" aria-hidden="true">
+    <div class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="driveExportHeading">
+      <div class="sheet-header">
+        <h2 class="sheet-title" id="driveExportHeading">📄 存成 Google Doc</h2>
+        <button class="icon-btn" id="closeDriveExportBtn" type="button" aria-label="關閉">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="sheet-body">
+        <div class="drive-unconfigured-banner hidden" id="driveUnconfiguredBanner">
+          <div>
+            <strong>尚未連結你的 Google Drive</strong>
+            <span>請先完成 2 分鐘 Apps Script 私人橋接設定，之後即可 1 鍵建立 Google Doc。</span>
+          </div>
+          <button class="banner-btn" id="goDriveSetupBtn" type="button">去設定</button>
+        </div>
+
+        <div class="export-meta-pill" id="exportMetaSummary">共 0 段・0 字</div>
+
+        <div class="field-group">
+          <label class="field-label" for="exportTitleInput">
+            <span>文件標題（選填）</span>
+            <span class="field-hint" id="exportFolderHint">資料夾：隨身口譯官</span>
+          </label>
+          <input
+            type="text"
+            id="exportTitleInput"
+            class="text-control"
+            placeholder="留空將由 AI 依內容自動擬定新聞標題"
+            maxlength="120"
+            autocomplete="off"
+          />
+        </div>
+
+        <label class="setting-row">
+          <span>
+            <strong style="display:block;font-size:13.5px;">✨ AI 自動擬標題＋3 點重點摘要</strong>
+            <span class="field-hint">在文件開頭加上重點摘要盒（約 NT$0.02），之後在 Drive 搜尋一目了然</span>
+          </span>
+          <input type="checkbox" id="exportAiSummaryCheck" checked />
+        </label>
+
+        <div class="field-group">
+          <span class="field-label">中英文排版格式</span>
+          <div class="export-layout-seg" id="exportLayoutSeg" role="radiogroup" aria-label="排版格式">
+            <button type="button" class="export-layout-btn active" data-layout="bilingual" aria-checked="true">中英逐段對照（推薦）</button>
+            <button type="button" class="export-layout-btn" data-layout="appendix" aria-checked="false">純中文＋英文附錄</button>
+          </div>
+        </div>
+
+        <label class="setting-row">
+          <span>
+            <strong style="display:block;font-size:13.5px;">上傳成功後自動清空目前聆聽內容</strong>
+            <span class="field-hint">方便接著聽下一則新聞（若上傳失敗絕不會清空）</span>
+          </span>
+          <input type="checkbox" id="exportClearAfterCheck" />
+        </label>
+
+        <div class="test-result" id="driveUploadStatus"></div>
+
+        <div class="export-action-row">
+          <button class="btn-secondary" id="copyBilingualTextBtn" type="button">複製中英全文</button>
+          <button class="btn-primary" id="confirmDriveUploadBtn" type="button" style="flex:1.5;">📄 建立並存入 Drive</button>
+        </div>
       </div>
     </div>
   </div>
@@ -487,6 +629,6 @@
   <!-- Toast -->
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="./app.js?v=3.3"></script>
+  <script type="module" src="./app.js?v=3.4"></script>
 </body>
 </html>

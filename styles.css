@@ -1,5 +1,5 @@
 /* ============================================================================
-   隨身口譯官 v3.3 — Apple iOS / visionOS-Inspired Design System
+   隨身口譯官 v3.4 — Apple iOS / visionOS-Inspired Design System
    Continuous squircle & capsule geometry, frosted vibrancy materials,
    viewport-locked fixed top navigation, silky GPU mode transitions,
    and AAA light/dark contrast.
@@ -2912,6 +2912,231 @@ button {
 
 .quota-reset-link:active {
   transform: scale(0.93);
+}
+
+/* ============================================================================
+   Google Drive / Google Doc Export & Personal Apps Script Bridge UI (v3.4)
+   ============================================================================ */
+.bc-tool-btn.primary-doc {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: rgba(10, 125, 121, 0.28);
+  font-weight: 700;
+}
+
+[data-theme="dark"] .bc-tool-btn.primary-doc {
+  border-color: rgba(56, 194, 183, 0.34);
+}
+
+.bc-tool-btn.primary-doc.empty {
+  color: var(--ink-muted);
+  background: var(--bg-card);
+  border-color: var(--border);
+  opacity: 0.6;
+}
+
+@media (max-width: 400px) {
+  .broadcast-toolbar {
+    padding: 7px 10px;
+    gap: 6px;
+  }
+  .broadcast-tools {
+    gap: 4px;
+  }
+  .bc-tool-btn {
+    height: 27px;
+    padding: 0 7.5px;
+    font-size: 11px;
+  }
+}
+
+.broadcast-paused-bar {
+  gap: 8px;
+}
+
+.broadcast-paused-bar .bc-resume-btn {
+  flex: 1;
+  font-size: 13.5px;
+}
+
+.bc-drive-btn {
+  flex: 1.55;
+  height: 48px;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(180deg, #0E8D88 0%, var(--accent) 100%);
+  color: var(--accent-ink);
+  font-size: 14px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  white-space: nowrap;
+  box-shadow: 0 4px 16px rgba(10, 125, 121, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.26);
+  transition: transform 0.16s var(--ease-spring), opacity 0.16s ease;
+}
+
+[data-theme="dark"] .bc-drive-btn {
+  background: linear-gradient(180deg, #4AD5CA 0%, var(--accent) 100%);
+  box-shadow: 0 4px 18px rgba(56, 194, 183, 0.30), inset 0 1px 0 rgba(255, 255, 255, 0.34);
+}
+
+.bc-drive-btn:active {
+  transform: scale(0.96);
+}
+
+.bc-drive-btn.empty {
+  opacity: 0.55;
+}
+
+.broadcast-paused-bar .bc-back-btn {
+  flex: 0.9;
+  font-size: 13px;
+}
+
+.drive-setup-card {
+  padding: 15px 15px 14px;
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.drive-setup-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.drive-setup-title {
+  display: block;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  margin-bottom: 2px;
+}
+
+.drive-status-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-card);
+  color: var(--ink-muted);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.drive-status-badge.ready {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: rgba(10, 125, 121, 0.28);
+}
+
+[data-theme="dark"] .drive-status-badge.ready {
+  border-color: rgba(56, 194, 183, 0.36);
+}
+
+.drive-grid-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 9px;
+}
+
+.inline-text-link {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.drive-copy-script-btn {
+  width: 100%;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 12.5px;
+  color: var(--accent);
+  border-color: rgba(10, 125, 121, 0.28);
+  background: var(--accent-soft);
+}
+
+[data-theme="dark"] .drive-copy-script-btn {
+  border-color: rgba(56, 194, 183, 0.34);
+}
+
+.drive-unconfigured-banner {
+  padding: 12px 13px;
+  border-radius: var(--radius-md);
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  border: 1px solid var(--warn-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+}
+
+.drive-unconfigured-banner.hidden {
+  display: none;
+}
+
+.drive-unconfigured-banner strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+
+.export-meta-pill {
+  padding: 9px 13px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.export-layout-seg {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+}
+
+.export-layout-btn {
+  height: 36px;
+  border-radius: var(--radius-pill);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-secondary);
+  background: transparent;
+  transition: background 0.2s var(--ease-apple), color 0.18s ease, box-shadow 0.2s ease, transform 0.14s var(--ease-spring);
+}
+
+.export-layout-btn:active {
+  transform: scale(0.95);
+}
+
+.export-layout-btn.active {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 700;
+  box-shadow: 0 2px 10px rgba(10, 125, 121, 0.24);
+}
+
+.export-action-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
 }
 
 /* Accessibility: Respect OS Reduced Motion Preference */

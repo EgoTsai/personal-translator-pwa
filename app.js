@@ -2,7 +2,7 @@
  * app.js — Main UI controller for 隨身口譯官 PWA
  */
 
-import { AudioEngine } from './audio.js?v=3.3';
+import { AudioEngine } from './audio.js?v=3.4';
 import {
   USD_TO_TWD,
   MODEL_CATALOG_ORDER,
@@ -14,13 +14,23 @@ import {
   ICEBREAKER_BANNERS,
   interpretDialogueAudio,
   interpretBroadcastAudio,
+  summarizeBroadcastForDoc,
   polishBroadcastText,
   translateOutboundChinese,
   translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
-} from './gemini.js?v=3.3';
-import { GeminiLiveClient } from './live.js?v=3.3';
+} from './gemini.js?v=3.4';
+import { GeminiLiveClient } from './live.js?v=3.4';
+import {
+  generateDriveSecret,
+  isValidAppsScriptUrl,
+  isValidGoogleDocUrl,
+  buildAppsScriptCode,
+  testDriveBridge,
+  uploadDocToDrive,
+  buildBilingualPlainText,
+} from './drive.js?v=3.4';
 
 const STORAGE_KEYS = {
   settings: 'pt_settings_v1',
@@ -38,6 +48,12 @@ const DEFAULT_SETTINGS = {
   liveModel: 'gemini-3.8-live',
   ttsModel: 'gemini-3.8-flash-lite-tts',
   monthlyBudgetTwd: 300,
+  driveWebhookUrl: '',
+  driveSecret: '',
+  driveFolderName: '隨身口譯官',
+  exportAiSummary: true,
+  exportLayout: 'bilingual',
+  exportClearAfter: false,
   voiceName: 'Kore',
   tone: 'natural',
   glossary: '',
@@ -281,6 +297,7 @@ const els = {
   broadcastHint: $('broadcastHint'),
   bcFontBtn: $('bcFontBtn'),
   bcPolishBtn: $('bcPolishBtn'),
+  bcDriveBtn: $('bcDriveBtn'),
   bcCopyBtn: $('bcCopyBtn'),
   bcClearBtn: $('bcClearBtn'),
   broadcastCanvas: $('broadcastCanvas'),
@@ -288,6 +305,7 @@ const els = {
   bcDemoBtn: $('bcDemoBtn'),
   broadcastPausedBar: $('broadcastPausedBar'),
   bcResumeBtn: $('bcResumeBtn'),
+  bcPausedDriveBtn: $('bcPausedDriveBtn'),
   bcBackToChatBtn: $('bcBackToChatBtn'),
 
   quickTextRow: $('quickTextRow'),
@@ -330,7 +348,30 @@ const els = {
   draftCaptionCheck: $('draftCaptionCheck'),
   liveAutoSpeakCheck: $('liveAutoSpeakCheck'),
   showOriginalCheck: $('showOriginalCheck'),
+  driveSettingsSection: $('driveSettingsSection'),
+  driveSetupBadge: $('driveSetupBadge'),
+  driveFolderInput: $('driveFolderInput'),
+  driveSecretDisplay: $('driveSecretDisplay'),
+  regenDriveSecretBtn: $('regenDriveSecretBtn'),
+  copyAppsScriptBtn: $('copyAppsScriptBtn'),
+  driveWebhookInput: $('driveWebhookInput'),
+  testDriveBtn: $('testDriveBtn'),
+  driveTestResult: $('driveTestResult'),
   saveSettingsBtn: $('saveSettingsBtn'),
+
+  driveExportSheet: $('driveExportSheet'),
+  closeDriveExportBtn: $('closeDriveExportBtn'),
+  driveUnconfiguredBanner: $('driveUnconfiguredBanner'),
+  goDriveSetupBtn: $('goDriveSetupBtn'),
+  exportMetaSummary: $('exportMetaSummary'),
+  exportFolderHint: $('exportFolderHint'),
+  exportTitleInput: $('exportTitleInput'),
+  exportAiSummaryCheck: $('exportAiSummaryCheck'),
+  exportLayoutSeg: $('exportLayoutSeg'),
+  exportClearAfterCheck: $('exportClearAfterCheck'),
+  driveUploadStatus: $('driveUploadStatus'),
+  copyBilingualTextBtn: $('copyBilingualTextBtn'),
+  confirmDriveUploadBtn: $('confirmDriveUploadBtn'),
 
   showcardOverlay: $('showcardOverlay'),
   flipShowcardBtn: $('flipShowcardBtn'),
@@ -555,6 +596,12 @@ function syncClearButtonsState() {
   }
   if (els.bcClearBtn) {
     els.bcClearBtn.classList.toggle('empty', !hasBroadcast);
+  }
+  if (els.bcDriveBtn) {
+    els.bcDriveBtn.classList.toggle('empty', !hasBroadcast);
+  }
+  if (els.bcPausedDriveBtn) {
+    els.bcPausedDriveBtn.classList.toggle('empty', !hasBroadcast);
   }
 }
 
@@ -2331,6 +2378,7 @@ export function applyBroadcastCommit(job, result) {
     const newSeg = {
       id: makeId(),
       text: result.currentZh,
+      orig: String(result.origText || '').trim(),
       revised: false,
       settled: false,
       needsPolish: !job.hadPrevTail,
@@ -2427,9 +2475,14 @@ async function polishBroadcastTail(manualTrigger = false) {
       // Ensure target segments still exist contiguously in `para`
       const firstIdx = para.segments.findIndex((s) => s.id === targetIds[0]);
       if (firstIdx >= 0) {
+        const mergedOrig = targetSegs
+          .map((s) => String(s.orig || '').trim())
+          .filter(Boolean)
+          .join(' ');
         const mergedSeg = {
           id: makeId(),
           text: polished,
+          orig: mergedOrig,
           revised: true,
           settled: true,
           needsPolish: false,
@@ -2472,6 +2525,7 @@ function runBroadcastDemo() {
         {
           id: makeId(),
           text: '歡迎收看今日國際財經快訊。全球市場本週高度關注歐美央行的利率動向與最新通膨報告。',
+          orig: 'Welcome to today’s global financial briefing. Markets are closely watching central bank rate decisions and the latest inflation numbers across the US and Europe this week.',
           revised: false,
           settled: true,
           needsPolish: false,
@@ -2485,6 +2539,7 @@ function runBroadcastDemo() {
         {
           id: seg1Id,
           text: '歐洲央行今天宣布，儘管歐元區經濟成長低迷，他們可能暫時不會⋯',
+          orig: 'The European Central Bank announced today that despite sluggish Eurozone growth, it decided to hold interest rates steady for a third consecutive meeting,',
           revised: false,
           settled: false,
           needsPolish: false,
@@ -2504,10 +2559,11 @@ function runBroadcastDemo() {
       {
         revisedPrev: '歐洲央行今天宣布，儘管歐元區經濟成長低迷，仍決定連續第三次會議維持利率不變，',
         currentZh: '並強調服務業通膨仍具黏性，短期內將審慎觀察後續經濟數據再決定降息時程。',
+        origText: 'stressing that services inflation remains sticky and policymakers will carefully evaluate incoming economic data before committing to rate cuts.',
         newParagraph: false,
       }
     );
-    showToast('✨ 已示範：純中文連續顯示＋自動回頭修改前句語意！', 3400);
+    showToast('✨ 已示範：純中文連翻＋背景留存英文原文（點下方可存成 Google Doc）', 3600);
   }, 1300);
 }
 
@@ -3420,7 +3476,7 @@ function closeShowcard() {
 }
 
 // Settings Sheet
-function openSettings({ focusQuota = false } = {}) {
+function openSettings({ focusQuota = false, focusDrive = false } = {}) {
   els.apiKeyInput.value = settings.apiKey;
   els.modelSelect.value = settings.model;
   if (els.useLiveInDialogueCheck) {
@@ -3435,6 +3491,20 @@ function openSettings({ focusQuota = false } = {}) {
   if (els.calibrateSpentInput) {
     els.calibrateSpentInput.value = '';
   }
+  if (els.driveFolderInput) {
+    els.driveFolderInput.value = settings.driveFolderName || '隨身口譯官';
+  }
+  if (els.driveSecretDisplay) {
+    els.driveSecretDisplay.value = ensureDriveSecret();
+  }
+  if (els.driveWebhookInput) {
+    els.driveWebhookInput.value = settings.driveWebhookUrl || '';
+  }
+  if (els.driveTestResult) {
+    els.driveTestResult.textContent = '';
+    els.driveTestResult.className = 'test-result';
+  }
+  syncDriveSetupBadge();
   els.ttsModelSelect.value = settings.ttsModel;
   els.voiceSelect.value = settings.voiceName;
   els.toneSelect.value = settings.tone;
@@ -3451,10 +3521,11 @@ function openSettings({ focusQuota = false } = {}) {
   renderQuotaUI({ previewForm: true });
   els.settingsSheet.classList.add('open');
   els.settingsSheet.setAttribute('aria-hidden', 'false');
-  if (focusQuota && els.quotaSection && typeof els.quotaSection.scrollIntoView === 'function') {
+  const scrollTarget = focusDrive ? els.driveSettingsSection : focusQuota ? els.quotaSection : null;
+  if (scrollTarget && typeof scrollTarget.scrollIntoView === 'function') {
     setTimeout(() => {
       try {
-        els.quotaSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        scrollTarget.scrollIntoView({ behavior: 'smooth', block: 'center' });
       } catch (_) {}
     }, 140);
   }
@@ -3485,6 +3556,20 @@ function saveSettingsFromForm() {
     const parsedBudget = Number(els.budgetTwdInput.value);
     if (Number.isFinite(parsedBudget) && parsedBudget >= 10) {
       settings.monthlyBudgetTwd = Math.min(100000, Math.round(parsedBudget));
+    }
+  }
+  if (els.driveFolderInput) {
+    settings.driveFolderName = els.driveFolderInput.value.trim().slice(0, 60) || '隨身口譯官';
+  }
+  if (els.driveWebhookInput) {
+    const rawUrl = els.driveWebhookInput.value.trim();
+    if (!rawUrl) {
+      settings.driveWebhookUrl = '';
+    } else if (isValidAppsScriptUrl(rawUrl)) {
+      settings.driveWebhookUrl = rawUrl;
+    } else {
+      showToast('Apps Script 網址格式不正確（須以 https://script.google.com/macros/s/ 開頭）', 3600);
+      return;
     }
   }
   settings.ttsModel = els.ttsModelSelect.value;
@@ -4197,10 +4282,378 @@ if (els.resetUsageBtn) {
   });
 }
 
+// ============================================================================
+// Personal Google Drive / Google Docs Export Controller (Apps Script Bridge)
+// ============================================================================
+let driveUploadBusy = false;
+
+function ensureDriveSecret() {
+  if (!settings.driveSecret || String(settings.driveSecret).trim().length < 16) {
+    settings.driveSecret = generateDriveSecret(28);
+    saveState();
+  }
+  return settings.driveSecret;
+}
+
+function syncDriveSetupBadge(urlOverride = null) {
+  const url = urlOverride !== null ? String(urlOverride).trim() : String(settings.driveWebhookUrl || '').trim();
+  const ready = isValidAppsScriptUrl(url) && Boolean(ensureDriveSecret());
+  if (els.driveSetupBadge) {
+    els.driveSetupBadge.textContent = ready ? '已連結' : '未設定';
+    els.driveSetupBadge.classList.toggle('ready', ready);
+  }
+  return ready;
+}
+
+function formatLocalDateTime(now = new Date()) {
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  return { datePart: `${y}-${m}-${d}`, full: `${y}-${m}-${d} ${hh}:${mm}` };
+}
+
+function getBroadcastBilingualParagraphs() {
+  return broadcastParagraphs
+    .map((para) => {
+      const segs = Array.isArray(para?.segments) ? para.segments : [];
+      const zh = segs.map((s) => String(s?.text || '').trim()).filter(Boolean).join('').trim();
+      const orig = segs.map((s) => String(s?.orig || '').trim()).filter(Boolean).join(' ').trim();
+      return { zh, orig, time: para?.time || '' };
+    })
+    .filter((p) => p.zh || p.orig);
+}
+
+function syncExportLayoutUI(layoutVal) {
+  const activeLayout = layoutVal === 'appendix' ? 'appendix' : 'bilingual';
+  settings.exportLayout = activeLayout;
+  if (!els.exportLayoutSeg) return;
+  els.exportLayoutSeg.querySelectorAll('.export-layout-btn').forEach((btn) => {
+    const isActive = btn.dataset.layout === activeLayout;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-checked', String(isActive));
+  });
+}
+
+function openDriveExportSheet() {
+  const paras = getBroadcastBilingualParagraphs();
+  if (!paras.length) {
+    showToast('目前還沒有可儲存的聆聽翻譯內容');
+    return;
+  }
+
+  const isConfigured = syncDriveSetupBadge();
+  const folderName = String(settings.driveFolderName || '隨身口譯官').trim() || '隨身口譯官';
+  const totalChars = paras.reduce((sum, p) => sum + p.zh.length, 0);
+  const withOrigCount = paras.filter((p) => Boolean(p.orig)).length;
+
+  if (els.driveUnconfiguredBanner) {
+    els.driveUnconfiguredBanner.classList.toggle('hidden', isConfigured);
+  }
+  if (els.exportMetaSummary) {
+    els.exportMetaSummary.textContent =
+      withOrigCount > 0
+        ? `共 ${paras.length} 段・約 ${totalChars.toLocaleString()} 字・已同步保留 ${withOrigCount} 段原文`
+        : `共 ${paras.length} 段・約 ${totalChars.toLocaleString()} 字（純中文；新錄製的外語將自動保留原文）`;
+  }
+  if (els.exportFolderHint) {
+    els.exportFolderHint.textContent = `資料夾：${folderName}`;
+  }
+  if (els.exportTitleInput) {
+    els.exportTitleInput.value = '';
+  }
+  if (els.exportAiSummaryCheck) {
+    els.exportAiSummaryCheck.checked = settings.exportAiSummary !== false;
+  }
+  if (els.exportClearAfterCheck) {
+    els.exportClearAfterCheck.checked = Boolean(settings.exportClearAfter);
+  }
+  syncExportLayoutUI(settings.exportLayout || 'bilingual');
+
+  if (els.driveUploadStatus) {
+    els.driveUploadStatus.textContent = '';
+    els.driveUploadStatus.className = 'test-result';
+  }
+  if (els.confirmDriveUploadBtn) {
+    els.confirmDriveUploadBtn.disabled = false;
+    els.confirmDriveUploadBtn.textContent = isConfigured ? '📄 建立並存入 Drive' : '⚙️ 前往設定 Drive';
+  }
+
+  if (els.driveExportSheet) {
+    els.driveExportSheet.classList.add('open');
+    els.driveExportSheet.setAttribute('aria-hidden', 'false');
+  }
+}
+
+function closeDriveExportSheet() {
+  if (!els.driveExportSheet) return;
+  els.driveExportSheet.classList.remove('open');
+  els.driveExportSheet.setAttribute('aria-hidden', 'true');
+}
+
+async function executeDriveDocUpload() {
+  if (driveUploadBusy) return;
+
+  const isConfigured = isValidAppsScriptUrl(settings.driveWebhookUrl) && Boolean(ensureDriveSecret());
+  if (!isConfigured) {
+    closeDriveExportSheet();
+    openSettings({ focusDrive: true });
+    showToast('請先完成 2 分鐘 Google Drive 私人橋接設定', 3200);
+    return;
+  }
+
+  if (!isOnline) {
+    showToast('目前處於離線狀態，恢復網路後即可上傳');
+    return;
+  }
+
+  const paras = getBroadcastBilingualParagraphs();
+  if (!paras.length) {
+    showToast('目前沒有可上傳的翻譯內容');
+    return;
+  }
+
+  const wantAiSummary = Boolean(els.exportAiSummaryCheck ? els.exportAiSummaryCheck.checked : true);
+  const layout = settings.exportLayout === 'appendix' ? 'appendix' : 'bilingual';
+  const clearAfter = Boolean(els.exportClearAfterCheck ? els.exportClearAfterCheck.checked : false);
+  const customTitle = els.exportTitleInput ? els.exportTitleInput.value.trim() : '';
+
+  settings.exportAiSummary = wantAiSummary;
+  settings.exportLayout = layout;
+  settings.exportClearAfter = clearAfter;
+  saveState();
+
+  driveUploadBusy = true;
+  if (els.confirmDriveUploadBtn) {
+    els.confirmDriveUploadBtn.disabled = true;
+    els.confirmDriveUploadBtn.textContent = wantAiSummary ? '✨ AI 整理摘要中⋯' : '☁️ 建立文件中⋯';
+  }
+  if (els.driveUploadStatus) {
+    els.driveUploadStatus.className = 'test-result';
+    els.driveUploadStatus.textContent = wantAiSummary
+      ? '✨ 正在由 AI 擬定新聞標題與 3 點重點摘要⋯'
+      : '☁️ 正在建立 Google Doc 並存入 Drive⋯';
+  }
+
+  try {
+    const dt = formatLocalDateTime();
+    let finalTitle = customTitle;
+    let summaryBullets = [];
+
+    if (wantAiSummary && settings.apiKey) {
+      try {
+        const aiMeta = await summarizeBroadcastForDoc({
+          apiKey: settings.apiKey,
+          model: settings.model || 'gemini-3.5-flash-lite',
+          paragraphs: paras,
+        });
+        if (aiMeta) {
+          if (!finalTitle && aiMeta.title) {
+            finalTitle = `${dt.datePart}｜${aiMeta.title}`;
+          }
+          if (Array.isArray(aiMeta.summaryBullets) && aiMeta.summaryBullets.length) {
+            summaryBullets = aiMeta.summaryBullets;
+          }
+        }
+      } catch (summaryErr) {
+        console.warn('AI summary skipped, continuing upload:', summaryErr);
+      }
+    }
+
+    if (!finalTitle) {
+      const langInfo = TARGET_LANGUAGES[settings.targetLang] || TARGET_LANGUAGES.en;
+      finalTitle = `${dt.full} ${langInfo.label}聆聽翻譯`;
+    }
+
+    if (els.confirmDriveUploadBtn) {
+      els.confirmDriveUploadBtn.textContent = '☁️ 存入 Drive 中⋯';
+    }
+    if (els.driveUploadStatus) {
+      els.driveUploadStatus.textContent = '☁️ 正在建立排版好的 Google Doc 並存進你的雲端硬碟⋯';
+    }
+
+    const folderName = String(settings.driveFolderName || '隨身口譯官').trim() || '隨身口譯官';
+    const hasOrig = paras.some((p) => Boolean(p.orig));
+    const result = await uploadDocToDrive({
+      webhookUrl: settings.driveWebhookUrl,
+      secret: ensureDriveSecret(),
+      folderName,
+      title: finalTitle,
+      createdAt: dt.full,
+      modeLabel: hasOrig ? '聆聽翻譯（中英對照）' : '聆聽翻譯（純繁體中文）',
+      layout,
+      summaryBullets,
+      paragraphs: paras,
+    });
+
+    haptic([15, 35, 20]);
+    closeDriveExportSheet();
+
+    if (clearAfter) {
+      bcEpoch += 1;
+      broadcastParagraphs = [];
+      clearBroadcastStreamSpan();
+      const pendingInline = document.getElementById('bcPendingInline');
+      if (pendingInline) pendingInline.remove();
+      saveState();
+      renderBroadcastCanvas(true);
+      syncClearButtonsState();
+    }
+
+    const savedUrl = result.docUrl && isValidGoogleDocUrl(result.docUrl) ? result.docUrl : '';
+    showToast(
+      `✅ 已存成 Google Doc（${result.folderName || folderName}）`,
+      8000,
+      savedUrl
+        ? {
+            label: '開啟文件',
+            onClick: () => {
+              window.open(savedUrl, '_blank', 'noopener,noreferrer');
+            },
+          }
+        : null
+    );
+  } catch (err) {
+    console.error('Drive upload error:', err);
+    if (els.driveUploadStatus) {
+      els.driveUploadStatus.className = 'test-result err';
+      els.driveUploadStatus.textContent = err.message || '上傳失敗，內容仍保留在本機。';
+    }
+    showToast(`上傳失敗：${err.message || '請稍後再試'}`, 3800);
+  } finally {
+    driveUploadBusy = false;
+    if (els.confirmDriveUploadBtn) {
+      els.confirmDriveUploadBtn.disabled = false;
+      els.confirmDriveUploadBtn.textContent = '📄 建立並存入 Drive';
+    }
+  }
+}
+
+// Broadcast Google Doc Export Buttons
+if (els.bcDriveBtn) {
+  els.bcDriveBtn.addEventListener('click', () => {
+    haptic(10);
+    openDriveExportSheet();
+  });
+}
+if (els.bcPausedDriveBtn) {
+  els.bcPausedDriveBtn.addEventListener('click', () => {
+    haptic(10);
+    openDriveExportSheet();
+  });
+}
+if (els.closeDriveExportBtn) {
+  els.closeDriveExportBtn.addEventListener('click', closeDriveExportSheet);
+}
+if (els.driveExportSheet) {
+  els.driveExportSheet.addEventListener('click', (e) => {
+    if (e.target === els.driveExportSheet) closeDriveExportSheet();
+  });
+}
+if (els.goDriveSetupBtn) {
+  els.goDriveSetupBtn.addEventListener('click', () => {
+    closeDriveExportSheet();
+    openSettings({ focusDrive: true });
+  });
+}
+if (els.exportLayoutSeg) {
+  els.exportLayoutSeg.addEventListener('click', (e) => {
+    const btn = e.target.closest('.export-layout-btn');
+    if (!btn) return;
+    haptic(6);
+    syncExportLayoutUI(btn.dataset.layout);
+    saveState();
+  });
+}
+if (els.copyBilingualTextBtn) {
+  els.copyBilingualTextBtn.addEventListener('click', async () => {
+    const paras = getBroadcastBilingualParagraphs();
+    if (!paras.length) return;
+    const dt = formatLocalDateTime();
+    const title = (els.exportTitleInput && els.exportTitleInput.value.trim()) || `${dt.full} 聆聽翻譯`;
+    const txt = buildBilingualPlainText({
+      title,
+      createdAt: dt.full,
+      paragraphs: paras,
+      layout: settings.exportLayout || 'bilingual',
+    });
+    try {
+      await navigator.clipboard.writeText(txt);
+      haptic(10);
+      showToast('已複製中英對照全文');
+    } catch (_) {
+      showToast('複製失敗');
+    }
+  });
+}
+if (els.confirmDriveUploadBtn) {
+  els.confirmDriveUploadBtn.addEventListener('click', executeDriveDocUpload);
+}
+
+// Settings: Personal Apps Script Bridge Controls
+if (els.copyAppsScriptBtn) {
+  els.copyAppsScriptBtn.addEventListener('click', async () => {
+    const secret = ensureDriveSecret();
+    const folderName = (els.driveFolderInput && els.driveFolderInput.value.trim()) || settings.driveFolderName || '隨身口譯官';
+    const code = buildAppsScriptCode({ secret, folderName });
+    try {
+      await navigator.clipboard.writeText(code);
+      haptic(12);
+      showToast('📋 已複製專屬 Apps Script 程式碼（已內建密鑰）', 3200);
+    } catch (_) {
+      showToast('無法寫入剪貼簿，請確認瀏覽器權限');
+    }
+  });
+}
+if (els.regenDriveSecretBtn) {
+  els.regenDriveSecretBtn.addEventListener('click', () => {
+    settings.driveSecret = generateDriveSecret(28);
+    saveState();
+    if (els.driveSecretDisplay) els.driveSecretDisplay.value = settings.driveSecret;
+    haptic(10);
+    showToast('已重新產生密鑰，請重新複製並更新 Apps Script 部署', 3600);
+  });
+}
+if (els.driveWebhookInput) {
+  els.driveWebhookInput.addEventListener('input', () => {
+    syncDriveSetupBadge(els.driveWebhookInput.value);
+  });
+}
+if (els.testDriveBtn) {
+  els.testDriveBtn.addEventListener('click', async () => {
+    const url = els.driveWebhookInput ? els.driveWebhookInput.value.trim() : '';
+    const folderName = (els.driveFolderInput && els.driveFolderInput.value.trim()) || '隨身口譯官';
+    const secret = ensureDriveSecret();
+    if (els.driveTestResult) {
+      els.driveTestResult.className = 'test-result';
+      els.driveTestResult.textContent = '連線測試中⋯';
+    }
+    try {
+      const res = await testDriveBridge({ webhookUrl: url, secret, folderName });
+      settings.driveWebhookUrl = url;
+      settings.driveFolderName = folderName;
+      saveState();
+      syncDriveSetupBadge(url);
+      if (els.driveTestResult) {
+        els.driveTestResult.className = 'test-result ok';
+        els.driveTestResult.textContent = `連線成功！目標資料夾「${res.folderName || folderName}」已就緒。`;
+      }
+      haptic(12);
+    } catch (err) {
+      if (els.driveTestResult) {
+        els.driveTestResult.className = 'test-result err';
+        els.driveTestResult.textContent = err.message;
+      }
+    }
+  });
+}
+
 // Register real-time Gemini token usage observer (REST + SSE + TTS)
 setUsageObserver(recordApiUsage);
 
 // Init
+ensureDriveSecret();
 syncViewportMetrics();
 requestAnimationFrame(syncViewportMetrics);
 setTimeout(syncViewportMetrics, 120);

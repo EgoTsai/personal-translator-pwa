@@ -884,12 +884,13 @@ Rules:
   return normalized;
 }
 
-const BROADCAST_REVISE_MARKER = '<<<REVISE>>>';
-const BROADCAST_REVISE_RE = /\r?\n?\s*<<<\s*REVISE\s*>>>\s*\r?\n?/i;
+const BROADCAST_MARKERS = ['<<<ORIG>>>', '<<<REVISE>>>'];
+const BROADCAST_ANY_MARKER_RE = /\r?\n?\s*<<<\s*(ORIG|REVISE)\s*>>>\s*\r?\n?/i;
+const BROADCAST_SPLIT_MARKER_RE = /\r?\n?\s*<<<\s*(ORIG|REVISE)\s*>>>\s*\r?\n?/gi;
 
 /**
  * Incrementally extract clean Traditional Chinese preview from first-token-first Broadcast SSE stream,
- * suppressing control tags ([P], [SILENT]) and any partial trailing `<<<REVISE>>>` delimiter.
+ * suppressing control tags ([P], [SILENT]) and any trailing `<<<ORIG>>>` / `<<<REVISE>>>` sections or partial prefixes.
  */
 export function extractBroadcastStreamPreview(raw) {
   const trimmedStart = String(raw || '').replace(/^\s+/, '');
@@ -911,23 +912,27 @@ export function extractBroadcastStreamPreview(raw) {
 
   const stripInlineMarkers = (txt) => String(txt || '').replace(/\s*\[(?:P|SILENT)\]\s*/gi, '').trim();
 
-  const fullMatch = BROADCAST_REVISE_RE.exec(body);
+  const fullMatch = BROADCAST_ANY_MARKER_RE.exec(body);
   if (fullMatch) {
+    const hasRevise = /<<<\s*REVISE\s*>>>/i.test(body.slice(fullMatch.index));
     return {
       currentZh: stripInlineMarkers(body.slice(0, fullMatch.index)),
-      revising: true,
+      revising: hasRevise,
     };
   }
 
-  // Strip any partial trailing prefix of `<<<REVISE>>>` so raw delimiter characters never flicker on screen
-  const maxSuffix = Math.min(body.length, BROADCAST_REVISE_MARKER.length - 1);
+  // Strip any partial trailing prefix of `<<<ORIG>>>` or `<<<REVISE>>>` so raw delimiter characters never flicker on screen
+  const maxMarkerLen = 12;
+  const maxSuffix = Math.min(body.length, maxMarkerLen - 1);
   for (let len = maxSuffix; len >= 1; len--) {
-    const suffix = body.slice(body.length - len);
-    if (BROADCAST_REVISE_MARKER.startsWith(suffix.toUpperCase())) {
-      return {
-        currentZh: stripInlineMarkers(body.slice(0, body.length - len)),
-        revising: len >= 3,
-      };
+    const suffixUpper = body.slice(body.length - len).toUpperCase();
+    for (const marker of BROADCAST_MARKERS) {
+      if (marker.startsWith(suffixUpper)) {
+        return {
+          currentZh: stripInlineMarkers(body.slice(0, body.length - len)),
+          revising: marker === '<<<REVISE>>>' && len >= 4,
+        };
+      }
     }
   }
 
@@ -936,6 +941,8 @@ export function extractBroadcastStreamPreview(raw) {
 
 /**
  * Parse completed first-token-first plain-text response from `interpretBroadcastAudio`.
+ * Supports optional `<<<ORIG>>>` (verbatim foreign source transcript) and `<<<REVISE>>>`
+ * (retroactive improvement of previous Chinese segment) in any trailing order.
  */
 export function parseBroadcastStreamResponse(raw) {
   let cleaned = String(raw || '').trim();
@@ -955,8 +962,9 @@ export function parseBroadcastStreamResponse(raw) {
       if (j && (typeof j.current_zh === 'string' || typeof j.revised_prev === 'string')) {
         const currentZh = stripInlineMarkers(j.current_zh);
         const revisedPrev = stripInlineMarkers(j.revised_prev);
+        const origText = stripInlineMarkers(j.orig_text || j.original || '');
         if (!currentZh && !revisedPrev) return null;
-        return { currentZh, revisedPrev, newParagraph: Boolean(j.new_paragraph) };
+        return { currentZh, origText, revisedPrev, newParagraph: Boolean(j.new_paragraph) };
       }
     } catch (_) {}
   }
@@ -968,25 +976,49 @@ export function parseBroadcastStreamResponse(raw) {
   }
   if (!cleaned || /^\[SILENT\]$/i.test(cleaned)) return null;
 
-  const match = BROADCAST_REVISE_RE.exec(cleaned);
-  if (match) {
-    const rawCurrent = cleaned.slice(0, match.index).trim();
-    const rawRevised = cleaned.slice(match.index + match[0].length).trim();
-    const safeCurrent = /^\[SILENT\]$/i.test(rawCurrent) ? '' : stripInlineMarkers(rawCurrent);
-    const safeRevised = /^\[SILENT\]$/i.test(rawRevised) ? '' : stripInlineMarkers(rawRevised);
-    if (!safeCurrent && !safeRevised) return null;
-    return { currentZh: safeCurrent, revisedPrev: safeRevised, newParagraph };
+  // Split into sections keyed by leading Chinese + optional ORIG / REVISE tags in any order
+  BROADCAST_SPLIT_MARKER_RE.lastIndex = 0;
+  let currentZhRaw = cleaned;
+  let origRaw = '';
+  let revisedRaw = '';
+
+  const matches = [];
+  let m;
+  while ((m = BROADCAST_SPLIT_MARKER_RE.exec(cleaned)) !== null) {
+    matches.push({ tag: m[1].toUpperCase(), index: m.index, end: m.index + m[0].length });
   }
 
-  const finalZh = stripInlineMarkers(cleaned);
-  if (!finalZh) return null;
-  return { currentZh: finalZh, revisedPrev: '', newParagraph };
+  if (matches.length > 0) {
+    currentZhRaw = cleaned.slice(0, matches[0].index);
+    for (let i = 0; i < matches.length; i++) {
+      const segEnd = i + 1 < matches.length ? matches[i + 1].index : cleaned.length;
+      const val = cleaned.slice(matches[i].end, segEnd).trim();
+      if (matches[i].tag === 'ORIG') {
+        origRaw = origRaw ? `${origRaw} ${val}` : val;
+      } else if (matches[i].tag === 'REVISE') {
+        revisedRaw = val;
+      }
+    }
+  }
+
+  const safeCurrent = /^\[SILENT\]$/i.test(currentZhRaw.trim()) ? '' : stripInlineMarkers(currentZhRaw);
+  const safeRevised = /^\[SILENT\]$/i.test(revisedRaw.trim()) ? '' : stripInlineMarkers(revisedRaw);
+  const safeOrig = /^\[SILENT\]$/i.test(origRaw.trim()) ? '' : stripInlineMarkers(origRaw);
+
+  if (!safeCurrent && !safeRevised) return null;
+  return {
+    currentZh: safeCurrent,
+    origText: safeOrig,
+    revisedPrev: safeRevised,
+    newParagraph,
+  };
 }
 
 /**
- * Scenario 2 (Primary): Continuous Chinese-Only Broadcast Interpreter ("聆聽翻譯" 連續純中文＋回頭潤飾)
+ * Scenario 2 (Primary): Continuous Chinese-Only Broadcast Interpreter ("聆聽翻譯" 連續純中文＋背景保留原文＋回頭潤飾)
  * - First-token-first plain-text streaming protocol: Token #1 is immediately the first Chinese character on screen!
- * - Zero JSON wrapper overhead and optional trailing `<<<REVISE>>>` single-pass retroactive self-correction.
+ * - Silently appends verbatim source transcript after `<<<ORIG>>>` (hidden from live UI, stored for bilingual Google Doc export)
+ *   and optional `<<<REVISE>>>` single-pass retroactive self-correction.
  */
 export async function interpretBroadcastAudio({
   apiKey,
@@ -1005,13 +1037,13 @@ export async function interpretBroadcastAudio({
   const cleanPrior = String(priorContext || '').trim();
   const glossaryLine = formatGlossaryLine(glossary);
 
-  const systemInstruction = `Simultaneous broadcast interpreter. Translate audio (primarily ${langInfo.nativeName} or any language) directly into fluent, natural Taiwan Traditional Chinese (zh-TW) like professional news subtitles. Never output foreign sentences or Japanese Kana (keep standard acronyms like AI, GDP, NATO). Keep Chinese speech verbatim in zh-TW.
-Output plain text ONLY (NO JSON, NO markdown):
+  const systemInstruction = `Simultaneous broadcast interpreter. Translate audio (primarily ${langInfo.nativeName} or any language) directly into fluent, natural Taiwan Traditional Chinese (zh-TW) like professional news subtitles. Never output foreign sentences or Japanese Kana in the Chinese part (keep standard acronyms like AI, GDP, NATO). Keep Chinese speech verbatim in zh-TW.
+Output plain text ONLY (NO JSON, NO markdown) in this exact order:
 - Silence, music, or noise only -> output exactly: [SILENT]
 - Prefix with [P] ONLY on a clear new topic or news segment shift.
-- Stream the new zh-TW translation immediately. Seamlessly skip any 1-2 word audio overlap from PREV.
-- ONLY IF PREV was provided and the new audio clearly clarifies or improves PREV (fixing SVO/SOV clause order, cut endings, pronouns, or proper nouns), append a newline, then <<<REVISE>>>, then a newline, then the complete improved zh-TW for PREV so PREV + new text read smoothly with zero duplication or omission.
-- If PREV already reads smoothly, STOP right after the new translation (omit <<<REVISE>>>).`;
+- Stream the new zh-TW translation FIRST immediately. Seamlessly skip any 1-2 word audio overlap from PREV.
+- Immediately after the new zh-TW translation, if the audio was non-Chinese, append a newline, then <<<ORIG>>>, then a newline, then the exact verbatim original transcript of the new audio (same non-overlapping span). If the audio was already Chinese, omit <<<ORIG>>>.
+- ONLY IF PREV was provided and the new audio clearly clarifies or improves PREV (fixing SVO/SOV clause order, cut endings, pronouns, or proper nouns), append a newline, then <<<REVISE>>>, then a newline, then the complete improved zh-TW for PREV so PREV + new text read smoothly with zero duplication or omission. Otherwise omit <<<REVISE>>>.`;
 
   const promptParts = [];
   if (glossaryLine) {
@@ -1023,7 +1055,7 @@ Output plain text ONLY (NO JSON, NO markdown):
   if (cleanPrev) {
     promptParts.push(`PREV (append <<<REVISE>>> only if new audio improves it):\n${cleanPrev}`);
   }
-  promptParts.push('Translate the new audio into continuous Taiwan zh-TW.');
+  promptParts.push('Translate the new audio into continuous Taiwan zh-TW first, then append <<<ORIG>>> with verbatim source speech.');
 
   const payload = {
     systemInstruction: {
@@ -1070,6 +1102,7 @@ Output plain text ONLY (NO JSON, NO markdown):
 
   let revisedPrev = cleanPrev ? String(parsed.revisedPrev || '').trim() : '';
   let currentZh = String(parsed.currentZh || '').trim();
+  const origText = String(parsed.origText || '').trim();
   const newParagraph = Boolean(parsed.newParagraph);
 
   // Guardrail: reject malformed or untranslated revisedPrev so we never corrupt prior good Chinese
@@ -1099,8 +1132,73 @@ Output plain text ONLY (NO JSON, NO markdown):
   return {
     revisedPrev,
     currentZh,
+    origText,
     newParagraph,
   };
+}
+
+/**
+ * Generate a concise Taiwan Traditional Chinese news/briefing title + 3 key takeaway bullets
+ * for exporting a Broadcast session into Google Docs.
+ */
+export async function summarizeBroadcastForDoc({
+  apiKey,
+  model = 'gemini-3.5-flash-lite',
+  paragraphs = [],
+  signal,
+}) {
+  const joined = (Array.isArray(paragraphs) ? paragraphs : [])
+    .map((p) => String(p?.zh || '').trim())
+    .filter(Boolean)
+    .join('\n\n')
+    .slice(0, 18000);
+
+  if (!joined || joined.length < 15) {
+    return null;
+  }
+
+  const prompt = [
+    '你是一位專業新聞編輯。請閱讀以下剛翻譯完成的繁體中文逐字內容，產出：',
+    '1. title：精準簡短的繁體中文文件標題（10～24 字，不含日期與引號，直指核心新聞／主題）。',
+    '2. summary_bullets：3 條重點摘要（每條 20～55 字，使用台灣繁體中文，忠於原文事實、不腦補）。',
+    '',
+    '【內容】',
+    joined,
+  ].join('\n');
+
+  const payload = {
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0.2,
+      ...buildThinkingConfig(model),
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'OBJECT',
+        properties: {
+          title: { type: 'STRING', description: 'Concise Traditional Chinese document title (10-24 chars)' },
+          summary_bullets: {
+            type: 'ARRAY',
+            items: { type: 'STRING' },
+            description: '3 concise Traditional Chinese key takeaway bullets',
+          },
+        },
+        required: ['title', 'summary_bullets'],
+      },
+    },
+  };
+
+  const data = await postGenerateContent(apiKey, model, payload, signal, 20000);
+  const raw = extractTextPart(data);
+  const parsed = safeJsonParse(raw);
+  if (!parsed) return null;
+
+  const title = String(parsed.title || '').replace(/^["「『]+|["」』]+$/g, '').trim().slice(0, 48);
+  const summaryBullets = Array.isArray(parsed.summary_bullets)
+    ? parsed.summary_bullets.map((s) => String(s || '').replace(/^[•\-*\d.\s]+/, '').trim()).filter(Boolean).slice(0, 4)
+    : [];
+
+  if (!title && !summaryBullets.length) return null;
+  return { title, summaryBullets };
 }
 
 /**
