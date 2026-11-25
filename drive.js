@@ -9,7 +9,7 @@
  */
 
 const APPS_SCRIPT_URL_RE = /^https:\/\/script\.google\.com\/macros\/(?:u\/\d+\/)?s\/[A-Za-z0-9_-]{20,}\/(?:exec|dev)$/;
-const GOOGLE_DOC_URL_RE = /^https:\/\/docs\.google\.com\/document\/d\/[A-Za-z0-9_-]+/;
+const DOC_ID_RE = /^[A-Za-z0-9_-]{10,128}$/;
 
 export function generateDriveSecret(length = 28) {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
@@ -32,8 +32,61 @@ export function isValidAppsScriptUrl(url) {
   return APPS_SCRIPT_URL_RE.test(String(url || '').trim());
 }
 
+/**
+ * Strictly validate Google Docs / Drive document URLs returned by Apps Script.
+ * Note: DocumentApp.create().getUrl() returns `https://docs.google.com/open?id=<ID>`
+ * in Google Apps Script, in addition to `/document/d/<ID>/edit`.
+ */
 export function isValidGoogleDocUrl(url) {
-  return GOOGLE_DOC_URL_RE.test(String(url || '').trim());
+  try {
+    const u = new URL(String(url || '').trim());
+    if (u.protocol !== 'https:') return false;
+    if (u.hostname === 'docs.google.com') {
+      if (/^\/document\/(?:u\/\d+\/)?d\/[A-Za-z0-9_-]{10,128}(?:\/[A-Za-z0-9_/-]*)?$/.test(u.pathname)) {
+        return true;
+      }
+      if (u.pathname === '/open' && DOC_ID_RE.test(u.searchParams.get('id') || '')) {
+        return true;
+      }
+      return false;
+    }
+    if (u.hostname === 'drive.google.com') {
+      if (/^\/file\/(?:u\/\d+\/)?d\/[A-Za-z0-9_-]{10,128}(?:\/[A-Za-z0-9_/-]*)?$/.test(u.pathname)) {
+        return true;
+      }
+      if (u.pathname === '/open' && DOC_ID_RE.test(u.searchParams.get('id') || '')) {
+        return true;
+      }
+      return false;
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+export function normalizeGoogleDocUrl(docUrl, docId = '') {
+  const cleanId = String(docId || '').trim();
+  const rawUrl = String(docUrl || '').trim();
+  if (rawUrl && !isValidGoogleDocUrl(rawUrl)) {
+    return '';
+  }
+  if (DOC_ID_RE.test(cleanId)) {
+    return `https://docs.google.com/document/d/${cleanId}/edit`;
+  }
+  if (!rawUrl) return '';
+  try {
+    const u = new URL(rawUrl);
+    if (u.pathname === '/open') {
+      const idParam = u.searchParams.get('id') || '';
+      if (DOC_ID_RE.test(idParam)) {
+        return `https://docs.google.com/document/d/${idParam}/edit`;
+      }
+    }
+  } catch (_) {
+    return '';
+  }
+  return rawUrl;
 }
 
 function sanitizeFolderName(name) {
@@ -249,10 +302,11 @@ function doPost(e) {
     const file = DriveApp.getFileById(doc.getId());
     file.moveTo(folder);
 
+    const docId = doc.getId();
     return jsonOut({
       ok: true,
-      docId: doc.getId(),
-      docUrl: doc.getUrl(),
+      docId: docId,
+      docUrl: 'https://docs.google.com/document/d/' + docId + '/edit',
       title: docTitle,
       folderName: folder.getName(),
     });
@@ -368,6 +422,10 @@ export async function uploadDocToDrive({
 
   if (data.docUrl && !isValidGoogleDocUrl(data.docUrl)) {
     throw new Error('回傳的文件連結格式異常，已攔截開啟以保護安全。');
+  }
+  const normalizedUrl = normalizeGoogleDocUrl(data.docUrl, data.docId);
+  if (normalizedUrl) {
+    data.docUrl = normalizedUrl;
   }
   return data;
 }

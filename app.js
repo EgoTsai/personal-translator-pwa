@@ -2,7 +2,7 @@
  * app.js — Main UI controller for 隨身口譯官 PWA
  */
 
-import { AudioEngine } from './audio.js?v=3.4.1';
+import { AudioEngine } from './audio.js?v=3.4.2';
 import {
   USD_TO_TWD,
   MODEL_CATALOG_ORDER,
@@ -20,8 +20,8 @@ import {
   translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
-} from './gemini.js?v=3.4.1';
-import { GeminiLiveClient } from './live.js?v=3.4.1';
+} from './gemini.js?v=3.4.2';
+import { GeminiLiveClient } from './live.js?v=3.4.2';
 import {
   generateDriveSecret,
   isValidAppsScriptUrl,
@@ -30,7 +30,7 @@ import {
   testDriveBridge,
   uploadDocToDrive,
   buildBilingualPlainText,
-} from './drive.js?v=3.4.1';
+} from './drive.js?v=3.4.2';
 
 const STORAGE_KEYS = {
   settings: 'pt_settings_v1',
