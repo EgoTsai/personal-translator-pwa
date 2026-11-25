@@ -2,7 +2,7 @@
  * app.js — Main UI controller for 隨身口譯官 PWA
  */
 
-import { AudioEngine } from './audio.js?v=3.1';
+import { AudioEngine } from './audio.js?v=3.2';
 import {
   TARGET_LANGUAGES,
   ICEBREAKER_BANNERS,
@@ -13,8 +13,8 @@ import {
   translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
-} from './gemini.js?v=3.1';
-import { GeminiLiveClient } from './live.js?v=3.1';
+} from './gemini.js?v=3.2';
+import { GeminiLiveClient } from './live.js?v=3.2';
 
 const STORAGE_KEYS = {
   settings: 'pt_settings_v1',
@@ -231,6 +231,8 @@ async function syncWakeLock() {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     syncWakeLock();
+    syncViewportMetrics();
+    setTimeout(syncViewportMetrics, 120);
   }
 });
 
@@ -239,6 +241,7 @@ const $ = (id) => document.getElementById(id);
 
 const els = {
   appShell: $('appShell'),
+  topHeader: $('topHeader'),
   statusDot: $('statusDot'),
   statusText: $('statusText'),
   turboBtn: $('turboBtn'),
@@ -252,6 +255,7 @@ const els = {
   dialogueSub: $('dialogueSub'),
   broadcastSwitch: $('broadcastSwitch'),
   broadcastSub: $('broadcastSub'),
+  listenStripCollapse: $('listenStripCollapse'),
   listenStrip: $('listenStrip'),
   liveTimerPill: $('liveTimerPill'),
   waveBars: $('waveBars'),
@@ -534,15 +538,55 @@ function syncClearButtonsState() {
   }
 }
 
+function syncViewportMetrics() {
+  if (typeof window === 'undefined') return;
+  if ((window.scrollY || 0) !== 0 || (window.scrollX || 0) !== 0) {
+    if (typeof window.scrollTo === 'function') window.scrollTo(0, 0);
+  }
+  if (document.documentElement && document.documentElement.scrollTop) {
+    document.documentElement.scrollTop = 0;
+  }
+  if (document.body && document.body.scrollTop) {
+    document.body.scrollTop = 0;
+  }
+  const vv = window.visualViewport;
+  const innerH = Number(window.innerHeight) || 0;
+  const vvH = vv && Number(vv.height) > 0 ? Number(vv.height) : innerH;
+  const targetH = innerH > 0 && vvH > 0 ? Math.min(vvH, innerH) : vvH || innerH;
+  const topOffset = vv && Number(vv.offsetTop) > 0 ? Math.round(vv.offsetTop) : 0;
+  const rootStyle = document.documentElement && document.documentElement.style;
+  if (rootStyle && typeof rootStyle.setProperty === 'function') {
+    if (targetH > 200) {
+      rootStyle.setProperty('--app-height', `${Math.round(targetH)}px`);
+    }
+    rootStyle.setProperty('--app-top', `${topOffset}px`);
+  }
+}
+
+function syncHeaderScrollElevation() {
+  if (!els.topHeader) return;
+  const activeScroller = viewMode === 'broadcast' ? els.broadcastCanvas : els.transcriptFeed;
+  const scrolled = Boolean(activeScroller && Number(activeScroller.scrollTop) > 6);
+  els.topHeader.classList.toggle('scrolled', scrolled);
+}
+
 function syncViewModeUI() {
   const isBcView = viewMode === 'broadcast';
   if (els.appShell) {
     els.appShell.classList.toggle('broadcast-immersive', isBcView);
   }
+  if (els.transcriptFeed && typeof els.transcriptFeed.setAttribute === 'function') {
+    els.transcriptFeed.setAttribute('aria-hidden', String(isBcView));
+  }
+  if (els.broadcastView && typeof els.broadcastView.setAttribute === 'function') {
+    els.broadcastView.setAttribute('aria-hidden', String(!isBcView));
+  }
   if (els.broadcastPausedBar) {
     els.broadcastPausedBar.classList.toggle('visible', isBcView && activeMode !== 'broadcast');
   }
   syncClearButtonsState();
+  syncHeaderScrollElevation();
+  syncViewportMetrics();
 }
 
 function updateHeaderStatus() {
@@ -669,8 +713,12 @@ function updateSwitchUI() {
     }
   }
 
-  // Live Meter / Listening Strip
-  els.listenStrip.classList.toggle('visible', Boolean(activeMode));
+  // Live Meter / Listening Strip (smooth CSS-Grid reveal/collapse)
+  const isListeningStripVisible = Boolean(activeMode);
+  els.listenStrip.classList.toggle('visible', isListeningStripVisible);
+  if (els.listenStripCollapse) {
+    els.listenStripCollapse.classList.toggle('visible', isListeningStripVisible);
+  }
   els.listenStrip.classList.toggle('dialogue-mode', isDialogueOn && !isLiveActive);
   els.listenStrip.classList.toggle('broadcast-mode', isBroadcastOn);
   els.listenStrip.classList.toggle('live-mode', isDialogueOn && isLiveActive);
@@ -2389,6 +2437,15 @@ async function toggleScenario(targetMode) {
   try {
     activeMode = targetMode;
     isLiveActive = false;
+    haptic(15);
+    if (targetMode === 'broadcast') {
+      // Suppress browser SpeechRecognition in Broadcast so ZERO raw English drafts appear on screen!
+      stopDraftRecognition(true);
+      renderBroadcastCanvas(false);
+    }
+    // 0ms optimistic transition: slide toggle, crossfade view, and glide bars immediately without waiting on mic stream init
+    els.vadStatus.textContent = audio.listening ? getIdleVadHint() : '正在啟動麥克風⋯';
+    updateSwitchUI();
     applyActiveAudioProfile();
 
     if (!audio.listening) {
@@ -2397,14 +2454,11 @@ async function toggleScenario(targetMode) {
     }
 
     if (targetMode === 'broadcast') {
-      // Suppress browser SpeechRecognition in Broadcast so ZERO raw English drafts appear on screen!
-      stopDraftRecognition(true);
       renderBroadcastCanvas(true);
     } else {
       startDraftRecognition(settings.targetLang);
     }
 
-    haptic(15);
     syncWakeLock();
     els.vadStatus.textContent = getIdleVadHint();
     updateSwitchUI();
@@ -3776,7 +3830,36 @@ if ('serviceWorker' in navigator) {
   });
 }
 
+// Viewport Lock & Header Scroll Elevation Wiring (keeps Row 1 pinned 100% of the time on Android Chrome PWA)
+if (els.transcriptFeed) {
+  els.transcriptFeed.addEventListener('scroll', syncHeaderScrollElevation, { passive: true });
+}
+if (els.broadcastCanvas) {
+  els.broadcastCanvas.addEventListener('scroll', syncHeaderScrollElevation, { passive: true });
+}
+if (els.quickChineseInput) {
+  els.quickChineseInput.addEventListener('blur', () => {
+    requestAnimationFrame(syncViewportMetrics);
+    setTimeout(syncViewportMetrics, 140);
+  });
+}
+window.addEventListener('resize', syncViewportMetrics, { passive: true });
+window.addEventListener('orientationchange', () => {
+  syncViewportMetrics();
+  setTimeout(syncViewportMetrics, 160);
+});
+window.addEventListener('pageshow', syncViewportMetrics);
+window.addEventListener('scroll', syncViewportMetrics, { passive: true });
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', syncViewportMetrics);
+  window.visualViewport.addEventListener('scroll', syncViewportMetrics);
+}
+
 // Init
+syncViewportMetrics();
+requestAnimationFrame(syncViewportMetrics);
+setTimeout(syncViewportMetrics, 120);
+setTimeout(syncViewportMetrics, 400);
 applyActiveAudioProfile();
 applyTheme();
 updateSwitchUI();

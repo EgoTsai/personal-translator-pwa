@@ -1,7 +1,8 @@
 /* ============================================================================
-   隨身口譯官 v3.0 — Apple iOS / visionOS-Inspired Design System
+   隨身口譯官 v3.2 — Apple iOS / visionOS-Inspired Design System
    Continuous squircle & capsule geometry, frosted vibrancy materials,
-   authentic Apple spring physics, and AAA light/dark contrast.
+   viewport-locked fixed top navigation, silky GPU mode transitions,
+   and AAA light/dark contrast.
    ============================================================================ */
 
 :root {
@@ -119,10 +120,25 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-html, body {
+html {
   margin: 0;
   padding: 0;
+  width: 100%;
   height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background: var(--bg-page);
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
   background: var(--bg-page);
   color: var(--ink);
   font-family: var(--font-sans);
@@ -130,7 +146,6 @@ html, body {
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  overscroll-behavior-y: none;
 }
 
 button, input, select, textarea {
@@ -145,15 +160,19 @@ button {
   padding: 0;
 }
 
-/* App Shell */
+/* App Shell — Viewport-Locked (defeats Android Chrome standalone PWA 100dvh overscroll bug) */
 .app-shell {
   display: flex;
   flex-direction: column;
-  height: 100dvh;
+  position: fixed;
+  top: var(--app-top, 0px);
+  left: 0;
+  right: 0;
+  height: var(--app-height, 100%);
+  max-height: 100%;
   max-width: 520px;
   margin: 0 auto;
   background: var(--bg-app);
-  position: relative;
   overflow: hidden;
   box-shadow: var(--shadow-md);
 }
@@ -165,15 +184,26 @@ button {
   }
 }
 
-/* Frosted Translucent Header */
+/* Row 1: Always-Fixed Frosted Translucent Top Navigation Bar */
 .top-header {
-  padding: calc(10px + var(--safe-top)) 14px 11px;
+  padding: calc(10px + var(--safe-top)) 14px 10px;
   background: var(--bg-glass);
   backdrop-filter: saturate(180%) blur(22px);
   -webkit-backdrop-filter: saturate(180%) blur(22px);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
-  z-index: 10;
+  position: relative;
+  z-index: 30;
+  touch-action: manipulation;
+  transition: box-shadow 0.24s var(--ease-apple), border-color 0.24s ease;
+}
+
+.top-header.scrolled {
+  box-shadow: 0 4px 16px rgba(17, 20, 24, 0.08);
+}
+
+[data-theme="dark"] .top-header.scrolled {
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.44);
 }
 
 .header-row {
@@ -497,11 +527,44 @@ button {
 }
 
 /* ============================================================================
-   Apple Sliding Segmented Language Control (High-Contrast Active Pill)
+   Apple Sliding Segmented Language Control (Silky CSS-Grid Collapsible Row)
    ============================================================================ */
+.lang-bar-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  flex-shrink: 0;
+  background: var(--bg-app);
+  transition:
+    grid-template-rows 0.30s var(--ease-apple),
+    opacity 0.22s var(--ease-apple);
+  touch-action: manipulation;
+}
+
+.lang-bar-collapse-inner {
+  overflow: hidden;
+  min-height: 0;
+  transform: translate3d(0, 0, 0);
+  transition: transform 0.30s var(--ease-apple);
+}
+
+.lang-bar-pad {
+  padding: 2px 14px 9px;
+}
+
+.app-shell.broadcast-immersive .lang-bar-collapse {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-shell.broadcast-immersive .lang-bar-collapse-inner {
+  transform: translate3d(0, -6px, 0);
+}
+
 .lang-bar {
   position: relative;
-  margin-top: 10px;
+  margin-top: 0;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 0;
@@ -591,12 +654,15 @@ button {
    Dual Scenario Deck (Apple Plush Squircle Cards + iOS UISwitch)
    ============================================================================ */
 .switch-deck {
-  padding: 10px 14px;
+  padding: 9px 14px 8px;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
   background: var(--bg-app);
   flex-shrink: 0;
+  position: relative;
+  z-index: 20;
+  touch-action: manipulation;
 }
 
 .switch-card {
@@ -621,8 +687,14 @@ button {
 
 @media (max-width: 380px) {
   .switch-deck {
-    padding: 8px 10px;
+    padding: 8px 10px 7px;
     gap: 8px;
+  }
+  .lang-bar-pad {
+    padding: 1px 10px 8px;
+  }
+  .listen-strip-pad {
+    padding: 0 10px 6px;
   }
   .switch-card {
     padding: 9px 10px;
@@ -769,13 +841,46 @@ button {
   transform: translateX(15px);
 }
 
-/* Live Listening Meter Strip */
+/* Live Listening Meter Strip (Smooth CSS-Grid Reveal/Collapse) */
+.listen-strip-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  flex-shrink: 0;
+  pointer-events: none;
+  transition:
+    grid-template-rows 0.28s var(--ease-apple),
+    opacity 0.22s var(--ease-apple);
+  touch-action: manipulation;
+}
+
+.listen-strip-collapse.visible {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.listen-strip-collapse-inner {
+  overflow: hidden;
+  min-height: 0;
+  transform: translate3d(0, -4px, 0);
+  transition: transform 0.28s var(--ease-apple);
+}
+
+.listen-strip-collapse.visible .listen-strip-collapse-inner {
+  transform: translate3d(0, 0, 0);
+}
+
+.listen-strip-pad {
+  padding: 0 14px 7px;
+}
+
 .listen-strip {
-  display: none;
+  display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin: 0 14px 6px;
+  margin: 0;
   padding: 8px 12px;
   border-radius: var(--radius-pill);
   background: var(--live-soft);
@@ -784,11 +889,7 @@ button {
   font-weight: 600;
   color: var(--live);
   flex-shrink: 0;
-}
-
-.listen-strip.visible {
-  display: flex;
-  animation: stripReveal 0.3s var(--ease-apple) both;
+  transition: background 0.24s var(--ease-apple), border-color 0.24s var(--ease-apple), color 0.24s ease;
 }
 
 @keyframes stripReveal {
@@ -931,18 +1032,47 @@ button {
 }
 
 /* ============================================================================
-   Transcript Feed & Apple iMessage-Style Bubbles
+   Main View Stage & Transcript Feed (GPU Spatial Crossfade + Scroll Isolation)
    ============================================================================ */
-.transcript-feed {
+.view-stage {
   flex: 1;
   min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.transcript-feed {
+  position: absolute;
+  inset: 0;
   overflow-y: auto;
-  padding: 8px 14px 18px;
+  overscroll-behavior-y: contain;
+  touch-action: pan-y;
+  padding: 6px 14px 18px;
   display: flex;
   flex-direction: column;
   gap: 11px;
   scroll-behavior: smooth;
   -webkit-overflow-scrolling: touch;
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+  visibility: visible;
+  pointer-events: auto;
+  will-change: opacity, transform;
+  transition:
+    opacity 0.24s var(--ease-apple),
+    transform 0.30s var(--ease-apple),
+    visibility 0s linear 0s;
+}
+
+.app-shell.broadcast-immersive .transcript-feed {
+  opacity: 0;
+  transform: translate3d(-18px, 0, 0);
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 0.20s var(--ease-apple),
+    transform 0.28s var(--ease-apple),
+    visibility 0s linear 0.28s;
 }
 
 .empty-state {
@@ -1526,6 +1656,34 @@ button {
 /* ============================================================================
    Frosted Apple Bottom Dock (Capsule Input + Circular Controls + Pill Mic)
    ============================================================================ */
+.bottom-dock-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  flex-shrink: 0;
+  transition:
+    grid-template-rows 0.28s var(--ease-apple),
+    opacity 0.20s var(--ease-apple);
+  touch-action: manipulation;
+}
+
+.bottom-dock-collapse-inner {
+  overflow: hidden;
+  min-height: 0;
+  transform: translate3d(0, 0, 0);
+  transition: transform 0.28s var(--ease-apple);
+}
+
+.app-shell.broadcast-immersive .bottom-dock-collapse {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-shell.broadcast-immersive .bottom-dock-collapse-inner {
+  transform: translate3d(0, 12px, 0);
+}
+
 .bottom-dock {
   padding: 11px 14px calc(13px + var(--safe-bottom));
   background: var(--bg-dock-glass);
@@ -1536,6 +1694,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 9px;
+  touch-action: manipulation;
 }
 
 .quick-text-row {
@@ -1793,6 +1952,8 @@ button {
 .sheet-body {
   padding: 18px 18px calc(24px + var(--safe-bottom));
   overflow-y: auto;
+  overscroll-behavior-y: contain;
+  touch-action: pan-y;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -2147,28 +2308,34 @@ button {
 
 /* ============================================================================
    Full-Screen Continuous Chinese Broadcast Reader (Apple Podcasts / Books Feel)
+   GPU-Composited Spatial Crossfade + Smooth Chrome Collapse
    ============================================================================ */
 .broadcast-view {
-  display: none;
-  flex: 1;
-  min-height: 0;
+  position: absolute;
+  inset: 0;
+  display: flex;
   flex-direction: column;
   background: var(--bg-card);
-}
-
-.app-shell.broadcast-immersive .lang-bar,
-.app-shell.broadcast-immersive .transcript-feed,
-.app-shell.broadcast-immersive .bottom-dock {
-  display: none;
-}
-
-.app-shell.broadcast-immersive .top-header {
-  padding-bottom: 9px;
+  opacity: 0;
+  transform: translate3d(18px, 0, 0);
+  visibility: hidden;
+  pointer-events: none;
+  will-change: opacity, transform;
+  transition:
+    opacity 0.20s var(--ease-apple),
+    transform 0.28s var(--ease-apple),
+    visibility 0s linear 0.28s;
 }
 
 .app-shell.broadcast-immersive .broadcast-view {
-  display: flex;
-  animation: paraFadeIn 0.28s var(--ease-apple) both;
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    opacity 0.24s var(--ease-apple),
+    transform 0.30s var(--ease-apple),
+    visibility 0s linear 0s;
 }
 
 .broadcast-toolbar {
@@ -2183,6 +2350,7 @@ button {
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  touch-action: manipulation;
 }
 
 .broadcast-hint {
@@ -2256,6 +2424,8 @@ button {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior-y: contain;
+  touch-action: pan-y;
   padding: 22px 20px calc(36px + var(--safe-bottom));
   background: var(--bg-card);
   color: var(--ink);

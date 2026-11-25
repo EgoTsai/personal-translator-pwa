@@ -658,10 +658,12 @@ export function extractBroadcastStreamPreview(raw) {
     }
   }
 
+  const stripInlineMarkers = (txt) => String(txt || '').replace(/\s*\[(?:P|SILENT)\]\s*/gi, '').trim();
+
   const fullMatch = BROADCAST_REVISE_RE.exec(body);
   if (fullMatch) {
     return {
-      currentZh: body.slice(0, fullMatch.index).trim(),
+      currentZh: stripInlineMarkers(body.slice(0, fullMatch.index)),
       revising: true,
     };
   }
@@ -672,13 +674,13 @@ export function extractBroadcastStreamPreview(raw) {
     const suffix = body.slice(body.length - len);
     if (BROADCAST_REVISE_MARKER.startsWith(suffix.toUpperCase())) {
       return {
-        currentZh: body.slice(0, body.length - len).trim(),
+        currentZh: stripInlineMarkers(body.slice(0, body.length - len)),
         revising: len >= 3,
       };
     }
   }
 
-  return { currentZh: body.trim(), revising: false };
+  return { currentZh: stripInlineMarkers(body), revising: false };
 }
 
 /**
@@ -693,13 +695,15 @@ export function parseBroadcastStreamResponse(raw) {
   }
   if (!cleaned || /^\[SILENT\]$/i.test(cleaned)) return null;
 
+  const stripInlineMarkers = (txt) => String(txt || '').replace(/\s*\[(?:P|SILENT)\]\s*/gi, '').trim();
+
   // Defensive fallback if model ever returns legacy JSON structure
   if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
     try {
       const j = safeJsonParse(cleaned);
       if (j && (typeof j.current_zh === 'string' || typeof j.revised_prev === 'string')) {
-        const currentZh = String(j.current_zh || '').trim();
-        const revisedPrev = String(j.revised_prev || '').trim();
+        const currentZh = stripInlineMarkers(j.current_zh);
+        const revisedPrev = stripInlineMarkers(j.revised_prev);
         if (!currentZh && !revisedPrev) return null;
         return { currentZh, revisedPrev, newParagraph: Boolean(j.new_paragraph) };
       }
@@ -715,15 +719,17 @@ export function parseBroadcastStreamResponse(raw) {
 
   const match = BROADCAST_REVISE_RE.exec(cleaned);
   if (match) {
-    const currentZh = cleaned.slice(0, match.index).trim();
-    const revisedPrev = cleaned.slice(match.index + match[0].length).trim();
-    const safeCurrent = /^\[SILENT\]$/i.test(currentZh) ? '' : currentZh;
-    const safeRevised = /^\[SILENT\]$/i.test(revisedPrev) ? '' : revisedPrev;
+    const rawCurrent = cleaned.slice(0, match.index).trim();
+    const rawRevised = cleaned.slice(match.index + match[0].length).trim();
+    const safeCurrent = /^\[SILENT\]$/i.test(rawCurrent) ? '' : stripInlineMarkers(rawCurrent);
+    const safeRevised = /^\[SILENT\]$/i.test(rawRevised) ? '' : stripInlineMarkers(rawRevised);
     if (!safeCurrent && !safeRevised) return null;
     return { currentZh: safeCurrent, revisedPrev: safeRevised, newParagraph };
   }
 
-  return { currentZh: cleaned, revisedPrev: '', newParagraph };
+  const finalZh = stripInlineMarkers(cleaned);
+  if (!finalZh) return null;
+  return { currentZh: finalZh, revisedPrev: '', newParagraph };
 }
 
 /**
