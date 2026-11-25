@@ -2,7 +2,7 @@
  * app.js — Main UI controller for 隨身口譯官 PWA
  */
 
-import { AudioEngine } from './audio.js?v=2.8';
+import { AudioEngine } from './audio.js?v=2.8.1';
 import {
   TARGET_LANGUAGES,
   ICEBREAKER_BANNERS,
@@ -13,8 +13,8 @@ import {
   translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
-} from './gemini.js?v=2.8';
-import { GeminiLiveClient } from './live.js?v=2.8';
+} from './gemini.js?v=2.8.1';
+import { GeminiLiveClient } from './live.js?v=2.8.1';
 
 const STORAGE_KEYS = {
   settings: 'pt_settings_v1',
@@ -660,7 +660,9 @@ function updateSwitchUI() {
 
   // Target language pills & outbound button label
   els.langBar.querySelectorAll('.lang-pill').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.lang === settings.targetLang);
+    const isActive = btn.dataset.lang === settings.targetLang;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-pressed', String(isActive));
   });
 
   els.quickChineseInput.placeholder = `輸入中文或外語，自動互譯（中文 ↔ ${langInfo.label}）⋯`;
@@ -3408,20 +3410,24 @@ els.langBar.addEventListener('click', (e) => {
   if (!pill) return;
   const changed = settings.targetLang !== pill.dataset.lang;
   settings.targetLang = pill.dataset.lang;
-  haptic(8);
+  haptic(10);
   saveState();
   updateSwitchUI();
-  if (changed && activeMode) {
+  if (changed) {
+    const langInfo = TARGET_LANGUAGES[settings.targetLang] || TARGET_LANGUAGES.en;
     if (activeMode === 'dialogue' && isLiveActive && liveConnected) {
-      showToast(`Live 串流切換語言為「${(TARGET_LANGUAGES[settings.targetLang] || TARGET_LANGUAGES.en).label}」⋯`, 2000);
+      showToast(`Live 串流切換語言為「${langInfo.label}」⋯`, 2000);
       const epoch = ++sessionEpoch;
       startLiveSession({ resume: false, epoch }).catch(() => {});
-    } else if (!isLiveActive) {
-      if (!audio.isSpeaking) {
-        els.vadStatus.textContent = getIdleVadHint();
-      }
-      if (activeMode === 'dialogue') {
-        startDraftRecognition(settings.targetLang);
+    } else {
+      showToast(`已切換為${langInfo.flag} ${langInfo.label}`, 1400);
+      if (activeMode && !isLiveActive) {
+        if (!audio.isSpeaking) {
+          els.vadStatus.textContent = getIdleVadHint();
+        }
+        if (activeMode === 'dialogue') {
+          startDraftRecognition(settings.targetLang);
+        }
       }
     }
   }
