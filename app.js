@@ -2,7 +2,7 @@
  * app.js — Main UI controller for 隨身口譯官 PWA
  */
 
-import { AudioEngine } from './audio.js?v=3.4.2';
+import { AudioEngine } from './audio.js?v=3.4.3';
 import {
   USD_TO_TWD,
   MODEL_CATALOG_ORDER,
@@ -12,6 +12,8 @@ import {
   setUsageObserver,
   TARGET_LANGUAGES,
   ICEBREAKER_BANNERS,
+  isValidModelId,
+  redactSecrets,
   interpretDialogueAudio,
   interpretBroadcastAudio,
   summarizeBroadcastForDoc,
@@ -20,9 +22,10 @@ import {
   translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
-} from './gemini.js?v=3.4.2';
-import { GeminiLiveClient } from './live.js?v=3.4.2';
+} from './gemini.js?v=3.4.3';
+import { GeminiLiveClient } from './live.js?v=3.4.3';
 import {
+  MIN_DRIVE_SECRET_LEN,
   generateDriveSecret,
   isValidAppsScriptUrl,
   isValidGoogleDocUrl,
@@ -30,7 +33,7 @@ import {
   testDriveBridge,
   uploadDocToDrive,
   buildBilingualPlainText,
-} from './drive.js?v=3.4.2';
+} from './drive.js?v=3.4.3';
 
 const STORAGE_KEYS = {
   settings: 'pt_settings_v1',
@@ -91,9 +94,44 @@ const TONE_ORDER = ['natural', 'polite', 'casual'];
 const BC_FONT_ORDER = ['sm', 'md', 'lg'];
 const BC_FONT_LABEL = { sm: '字級 小', md: '字級 中', lg: '字級 大' };
 
+function sanitizeLoadedSettings(raw) {
+  const merged = { ...DEFAULT_SETTINGS };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return merged;
+  }
+  for (const key of Object.keys(DEFAULT_SETTINGS)) {
+    if (Object.prototype.hasOwnProperty.call(raw, key) && raw[key] !== undefined && raw[key] !== null) {
+      merged[key] = raw[key];
+    }
+  }
+  merged.apiKey = typeof merged.apiKey === 'string' ? merged.apiKey.trim().slice(0, 256) : '';
+  if (!isValidModelId(merged.model)) merged.model = DEFAULT_SETTINGS.model;
+  if (!isValidModelId(merged.liveModel)) merged.liveModel = DEFAULT_SETTINGS.liveModel;
+  if (merged.ttsModel !== 'browser' && !isValidModelId(merged.ttsModel)) {
+    merged.ttsModel = DEFAULT_SETTINGS.ttsModel;
+  }
+  if (!Object.prototype.hasOwnProperty.call(TARGET_LANGUAGES, merged.targetLang)) {
+    merged.targetLang = DEFAULT_SETTINGS.targetLang;
+  }
+  if (!TONE_ORDER.includes(merged.tone)) merged.tone = DEFAULT_SETTINGS.tone;
+  if (!BC_FONT_ORDER.includes(merged.broadcastFontSize)) {
+    merged.broadcastFontSize = DEFAULT_SETTINGS.broadcastFontSize;
+  }
+  merged.theme = merged.theme === 'dark' ? 'dark' : 'light';
+  merged.exportLayout = merged.exportLayout === 'appendix' ? 'appendix' : 'bilingual';
+  const budget = Number(merged.monthlyBudgetTwd);
+  merged.monthlyBudgetTwd = Number.isFinite(budget) && budget >= 10 ? Math.min(100000, Math.round(budget)) : DEFAULT_SETTINGS.monthlyBudgetTwd;
+  merged.driveFolderName = String(merged.driveFolderName || DEFAULT_SETTINGS.driveFolderName).trim().slice(0, 60) || DEFAULT_SETTINGS.driveFolderName;
+  merged.driveSecret = typeof merged.driveSecret === 'string' ? merged.driveSecret.trim().slice(0, 128) : '';
+  const rawWebhook = typeof merged.driveWebhookUrl === 'string' ? merged.driveWebhookUrl.trim() : '';
+  merged.driveWebhookUrl = rawWebhook && isValidAppsScriptUrl(rawWebhook) ? rawWebhook : '';
+  merged.glossary = typeof merged.glossary === 'string' ? merged.glossary.trim().slice(0, 300) : '';
+  return merged;
+}
+
 // State + seamless settings migration across versions
 const storedSettings = loadJson(STORAGE_KEYS.settings, null);
-let settings = { ...DEFAULT_SETTINGS, ...(storedSettings || {}) };
+let settings = sanitizeLoadedSettings(storedSettings);
 if (storedSettings && Number(storedSettings.settingsVersion || 0) < 3) {
   const legacySilenceMap = { 650: 600, 850: 750, 1300: 1100, 1800: 1600 };
   const curSil = Number(storedSettings.silenceMs);
@@ -257,6 +295,8 @@ document.addEventListener('visibilitychange', () => {
     syncWakeLock();
     syncViewportMetrics();
     setTimeout(syncViewportMetrics, 120);
+  } else {
+    maskSensitiveInputs();
   }
 });
 
@@ -522,7 +562,7 @@ let toastTimer = null;
 function showToast(msg, duration = 2600, action = null) {
   els.toast.textContent = '';
   const textSpan = document.createElement('span');
-  textSpan.textContent = msg;
+  textSpan.textContent = redactSecrets(msg);
   els.toast.appendChild(textSpan);
 
   if (action && action.label && typeof action.onClick === 'function') {
@@ -1267,6 +1307,35 @@ function clearStreamingCardDom() {
   if (existing) existing.remove();
 }
 
+const SAFE_THUMB_DATA_URL_RE = /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
+function isSafeThumbDataUrl(url) {
+  return typeof url === 'string' && SAFE_THUMB_DATA_URL_RE.test(url);
+}
+
+function createSpinnerElement(tag, id, className, label) {
+  const el = document.createElement(tag);
+  if (id) el.id = id;
+  el.className = className;
+  const spin = document.createElement('span');
+  spin.className = 'spinner';
+  const text = document.createElement('span');
+  text.textContent = label;
+  el.append(spin, text);
+  return el;
+}
+
+const TRUSTED_SVG_CACHE = new Map();
+function cloneTrustedSvg(markup) {
+  let cached = TRUSTED_SVG_CACHE.get(markup);
+  if (!cached) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(markup, 'image/svg+xml');
+    cached = doc.documentElement;
+    TRUSTED_SVG_CACHE.set(markup, cached);
+  }
+  return document.importNode(cached, true);
+}
+
 function syncPendingPillDom() {
   const feed = els.transcriptFeed;
   const existing = document.getElementById('pendingPill');
@@ -1275,11 +1344,7 @@ function syncPendingPillDom() {
   if (shouldShow) {
     const shouldScroll = isNearFeedBottom();
     if (!existing) {
-      const pill = document.createElement('div');
-      pill.id = 'pendingPill';
-      pill.className = 'pending-pill';
-      pill.innerHTML = `<span class="spinner"></span><span>Gemini 極速翻譯中⋯</span>`;
-      feed.appendChild(pill);
+      feed.appendChild(createSpinnerElement('div', 'pendingPill', 'pending-pill', 'Gemini 極速翻譯中⋯'));
     }
     if (shouldScroll) scrollFeedToBottom(true);
   } else if (existing) {
@@ -1324,7 +1389,7 @@ function appendMessageCard(msg, forceScroll = false) {
 
 function renderFeed(forceScroll = true) {
   const feed = els.transcriptFeed;
-  feed.innerHTML = '';
+  feed.replaceChildren();
 
   if (messages.length === 0 && !activeStreamState && !currentDraftText) {
     feed.appendChild(els.emptyState);
@@ -1343,11 +1408,7 @@ function renderFeed(forceScroll = true) {
   if (activeStreamState && (activeStreamState.mainText || activeStreamState.subText)) {
     feed.appendChild(buildStreamingCardElement(activeStreamState));
   } else if (pendingCount > 0) {
-    const pill = document.createElement('div');
-    pill.id = 'pendingPill';
-    pill.className = 'pending-pill';
-    pill.innerHTML = `<span class="spinner"></span><span>Gemini 極速翻譯中⋯</span>`;
-    feed.appendChild(pill);
+    feed.appendChild(createSpinnerElement('div', 'pendingPill', 'pending-pill', 'Gemini 極速翻譯中⋯'));
   }
 
   scrollFeedToBottom(forceScroll);
@@ -1355,14 +1416,14 @@ function renderFeed(forceScroll = true) {
 }
 
 const FLAG_SVG_MAP = {
-  en: `<svg class="flag-svg sm" viewBox="0 0 24 16" aria-hidden="true"><rect width="24" height="16" rx="2" fill="#B22234"/><path d="M0 2.5h24M0 5h24M0 7.5h24M0 10h24M0 12.5h24M0 15h24" stroke="#FFF" stroke-width="1.25"/><rect width="10.5" height="8.5" rx="1" fill="#3C3B6E"/><circle cx="2.3" cy="2.1" r=".6" fill="#FFF"/><circle cx="5.2" cy="2.1" r=".6" fill="#FFF"/><circle cx="8.1" cy="2.1" r=".6" fill="#FFF"/><circle cx="3.8" cy="4.2" r=".6" fill="#FFF"/><circle cx="6.7" cy="4.2" r=".6" fill="#FFF"/><circle cx="2.3" cy="6.3" r=".6" fill="#FFF"/><circle cx="5.2" cy="6.3" r=".6" fill="#FFF"/><circle cx="8.1" cy="6.3" r=".6" fill="#FFF"/></svg>`,
-  ja: `<svg class="flag-svg sm" viewBox="0 0 24 16" aria-hidden="true"><rect width="24" height="16" rx="2" fill="#FFFFFF"/><circle cx="12" cy="8" r="4.6" fill="#BC002D"/></svg>`,
-  sv: `<svg class="flag-svg sm" viewBox="0 0 24 16" aria-hidden="true"><rect width="24" height="16" rx="2" fill="#006AA7"/><rect x="7" width="3.2" height="16" fill="#FECC00"/><rect y="6.4" width="24" height="3.2" fill="#FECC00"/></svg>`,
+  en: `<svg xmlns="http://www.w3.org/2000/svg" class="flag-svg sm" viewBox="0 0 24 16" aria-hidden="true"><rect width="24" height="16" rx="2" fill="#B22234"/><path d="M0 2.5h24M0 5h24M0 7.5h24M0 10h24M0 12.5h24M0 15h24" stroke="#FFF" stroke-width="1.25"/><rect width="10.5" height="8.5" rx="1" fill="#3C3B6E"/><circle cx="2.3" cy="2.1" r=".6" fill="#FFF"/><circle cx="5.2" cy="2.1" r=".6" fill="#FFF"/><circle cx="8.1" cy="2.1" r=".6" fill="#FFF"/><circle cx="3.8" cy="4.2" r=".6" fill="#FFF"/><circle cx="6.7" cy="4.2" r=".6" fill="#FFF"/><circle cx="2.3" cy="6.3" r=".6" fill="#FFF"/><circle cx="5.2" cy="6.3" r=".6" fill="#FFF"/><circle cx="8.1" cy="6.3" r=".6" fill="#FFF"/></svg>`,
+  ja: `<svg xmlns="http://www.w3.org/2000/svg" class="flag-svg sm" viewBox="0 0 24 16" aria-hidden="true"><rect width="24" height="16" rx="2" fill="#FFFFFF"/><circle cx="12" cy="8" r="4.6" fill="#BC002D"/></svg>`,
+  sv: `<svg xmlns="http://www.w3.org/2000/svg" class="flag-svg sm" viewBox="0 0 24 16" aria-hidden="true"><rect width="24" height="16" rx="2" fill="#006AA7"/><rect x="7" width="3.2" height="16" fill="#FECC00"/><rect y="6.4" width="24" height="3.2" fill="#FECC00"/></svg>`,
 };
 
 /**
  * XSS-safe DOM helper: renders a trusted static flag SVG (if known) plus plain textContent spans.
- * Never interpolates dynamic or model-generated strings into innerHTML.
+ * Zero innerHTML usage anywhere in DOM rendering.
  */
 function renderFlagLabel(container, { prefix = '', flagCode = '', text = '' }) {
   container.textContent = '';
@@ -1373,7 +1434,7 @@ function renderFlagLabel(container, { prefix = '', flagCode = '', text = '' }) {
   if (svgMarkup) {
     const slot = document.createElement('span');
     slot.className = 'flag-slot';
-    slot.innerHTML = svgMarkup;
+    slot.appendChild(cloneTrustedSvg(svgMarkup));
     container.appendChild(slot);
   }
   const labelSpan = document.createElement('span');
@@ -1381,7 +1442,9 @@ function renderFlagLabel(container, { prefix = '', flagCode = '', text = '' }) {
   container.appendChild(labelSpan);
 }
 
-const SPEAKER_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path class="sp-wave-1" d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path class="sp-wave-2" d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
+const SPEAKER_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path class="sp-wave-1" d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path class="sp-wave-2" d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
+const EXPAND_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`;
+const COPY_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
 
 let loadingSpeakId = null;
 let openSpeakerPickerMsgId = null;
@@ -1419,7 +1482,7 @@ function createMessageCard(msg) {
     btn.className = `inline-speak-btn${subtle ? ' subtle' : ''}${playing ? ' playing' : ''}${loading ? ' loading' : ''}`;
     btn.title = playing ? '播放中（點擊停止）' : '朗讀這一句';
     btn.setAttribute('aria-label', btn.title);
-    btn.innerHTML = SPEAKER_ICON_SVG;
+    btn.appendChild(cloneTrustedSvg(SPEAKER_ICON_SVG));
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (audio.playingId === cacheId || loadingSpeakId === cacheId) {
@@ -1496,7 +1559,7 @@ function createMessageCard(msg) {
     expandBtn.className = 'mini-btn';
     expandBtn.title = '放大給對方看';
     expandBtn.setAttribute('aria-label', '放大給對方看');
-    expandBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`;
+    expandBtn.appendChild(cloneTrustedSvg(EXPAND_ICON_SVG));
     expandBtn.addEventListener('click', () => openShowcard(msg));
     actions.appendChild(expandBtn);
   }
@@ -1506,7 +1569,7 @@ function createMessageCard(msg) {
   copyBtn.className = 'mini-btn';
   copyBtn.title = '複製文字';
   copyBtn.setAttribute('aria-label', '複製文字');
-  copyBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+  copyBtn.appendChild(cloneTrustedSvg(COPY_ICON_SVG));
   copyBtn.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(copyText);
@@ -1524,7 +1587,7 @@ function createMessageCard(msg) {
   if (isPhoto) {
     const hero = document.createElement('div');
     hero.className = 'photo-hero';
-    if (msg.thumbUrl) {
+    if (isSafeThumbDataUrl(msg.thumbUrl)) {
       const img = document.createElement('img');
       img.className = 'photo-thumb';
       img.src = msg.thumbUrl;
@@ -2179,7 +2242,7 @@ function createBroadcastParaElement(para, isLastPara = false) {
 function renderBroadcastCanvas(forceScroll = true) {
   const canvas = els.broadcastCanvas;
   if (!canvas) return;
-  canvas.innerHTML = '';
+  canvas.replaceChildren();
 
   if (broadcastParagraphs.length === 0 && !bcStreamText && broadcastPendingCount === 0) {
     if (els.broadcastEmpty) canvas.appendChild(els.broadcastEmpty);
@@ -2272,11 +2335,7 @@ function syncBroadcastPendingInline() {
     if (!existing) {
       const paraEl = getOrCreateActiveBroadcastParaEl();
       if (!paraEl) return;
-      const badge = document.createElement('span');
-      badge.id = 'bcPendingInline';
-      badge.className = 'bc-pending-inline';
-      badge.innerHTML = `<span class="spinner"></span><span>翻譯中⋯</span>`;
-      paraEl.appendChild(badge);
+      paraEl.appendChild(createSpinnerElement('span', 'bcPendingInline', 'bc-pending-inline', '翻譯中⋯'));
     }
     if (shouldScroll) scrollBroadcastToBottom(true);
   } else if (existing) {
@@ -3377,10 +3436,24 @@ function compressImageFile(file, maxDim = 1280, quality = 0.82) {
   });
 }
 
+const ALLOWED_RASTER_IMAGE_TYPES = new Set([
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+  'image/bmp',
+  'image/avif',
+  'image/heic',
+  'image/heif',
+]);
+
 async function handlePhotoFileSelected(file) {
   if (!file) return;
-  if (file.type && !file.type.startsWith('image/')) {
-    showToast('請選擇圖片檔案（JPG／PNG／WebP）');
+  const mime = String(file.type || '').toLowerCase();
+  const isSvgName = /\.svgz?$/i.test(String(file.name || ''));
+  if (isSvgName || (mime && !ALLOWED_RASTER_IMAGE_TYPES.has(mime))) {
+    showToast('請選擇一般照片檔案（JPG／PNG／WebP／HEIC，不支援 SVG）');
     return;
   }
   if (typeof file.size === 'number' && file.size > 25 * 1024 * 1024) {
@@ -3532,12 +3605,24 @@ function openSettings({ focusQuota = false, focusDrive = false } = {}) {
   }
 }
 
-function closeSettings() {
-  // Always re-mask API Key & Drive Secret inputs when closing settings so they never stay exposed in plaintext
+let sensitiveMaskTimer = null;
+function maskSensitiveInputs() {
+  clearTimeout(sensitiveMaskTimer);
+  sensitiveMaskTimer = null;
   if (els.apiKeyInput) els.apiKeyInput.type = 'password';
   if (els.toggleKeyVisibility) els.toggleKeyVisibility.textContent = '顯示';
   if (els.driveSecretDisplay) els.driveSecretDisplay.type = 'password';
   if (els.toggleDriveSecretBtn) els.toggleDriveSecretBtn.textContent = '顯示';
+}
+
+function scheduleSensitiveMask(timeoutMs = 45000) {
+  clearTimeout(sensitiveMaskTimer);
+  sensitiveMaskTimer = setTimeout(maskSensitiveInputs, timeoutMs);
+}
+
+function closeSettings() {
+  // Always re-mask API Key & Drive Secret inputs when closing settings so they never stay exposed in plaintext
+  maskSensitiveInputs();
   els.settingsSheet.classList.remove('open');
   els.settingsSheet.setAttribute('aria-hidden', 'true');
   renderQuotaUI();
@@ -3551,10 +3636,30 @@ function saveSettingsFromForm() {
   const prevTone = settings.tone;
   const prevGlossary = settings.glossary || '';
 
-  settings.apiKey = els.apiKeyInput.value.trim();
-  settings.model = els.modelSelect.value;
+  const typedKey = els.apiKeyInput.value.trim();
+  const chosenModel = String(els.modelSelect.value || '').trim();
+  const chosenLiveModel = els.liveModelSelect ? String(els.liveModelSelect.value || '').trim() : settings.liveModel;
+  const chosenTtsModel = String(els.ttsModelSelect.value || '').trim();
+
+  if (els.driveSecretDisplay) {
+    const typedSecret = els.driveSecretDisplay.value.trim();
+    if (typedSecret && typedSecret.length < MIN_DRIVE_SECRET_LEN) {
+      showToast(`私人密鑰長度至少需 ${MIN_DRIVE_SECRET_LEN} 碼，建議點「重產」產生高強度密鑰`, 3600);
+      return;
+    }
+  }
+  if (els.driveWebhookInput) {
+    const rawUrl = els.driveWebhookInput.value.trim();
+    if (rawUrl && !isValidAppsScriptUrl(rawUrl)) {
+      showToast('Apps Script 網址格式不正確（須以 https://script.google.com/macros/s/ 開頭）', 3600);
+      return;
+    }
+  }
+
+  settings.apiKey = typedKey.slice(0, 256);
+  if (isValidModelId(chosenModel)) settings.model = chosenModel;
   if (els.useLiveInDialogueCheck) settings.useLiveInDialogue = els.useLiveInDialogueCheck.checked;
-  if (els.liveModelSelect) settings.liveModel = els.liveModelSelect.value;
+  if (els.liveModelSelect && isValidModelId(chosenLiveModel)) settings.liveModel = chosenLiveModel;
   if (els.budgetTwdInput) {
     const parsedBudget = Number(els.budgetTwdInput.value);
     if (Number.isFinite(parsedBudget) && parsedBudget >= 10) {
@@ -3566,22 +3671,17 @@ function saveSettingsFromForm() {
   }
   if (els.driveSecretDisplay) {
     const typedSecret = els.driveSecretDisplay.value.trim();
-    if (typedSecret.length >= 8) {
+    if (typedSecret.length >= MIN_DRIVE_SECRET_LEN) {
       settings.driveSecret = typedSecret.slice(0, 128);
     }
   }
   if (els.driveWebhookInput) {
     const rawUrl = els.driveWebhookInput.value.trim();
-    if (!rawUrl) {
-      settings.driveWebhookUrl = '';
-    } else if (isValidAppsScriptUrl(rawUrl)) {
-      settings.driveWebhookUrl = rawUrl;
-    } else {
-      showToast('Apps Script 網址格式不正確（須以 https://script.google.com/macros/s/ 開頭）', 3600);
-      return;
-    }
+    settings.driveWebhookUrl = rawUrl ? rawUrl : '';
   }
-  settings.ttsModel = els.ttsModelSelect.value;
+  if (chosenTtsModel === 'browser' || isValidModelId(chosenTtsModel)) {
+    settings.ttsModel = chosenTtsModel;
+  }
   settings.voiceName = els.voiceSelect.value;
   settings.tone = els.toneSelect.value;
   if (els.glossaryInput) settings.glossary = els.glossaryInput.value.trim().slice(0, 300);
@@ -4137,6 +4237,7 @@ els.toggleKeyVisibility.addEventListener('click', () => {
   const isPwd = els.apiKeyInput.type === 'password';
   els.apiKeyInput.type = isPwd ? 'text' : 'password';
   els.toggleKeyVisibility.textContent = isPwd ? '隱藏' : '顯示';
+  if (isPwd) scheduleSensitiveMask();
 });
 
 els.testKeyBtn.addEventListener('click', async () => {
@@ -4150,7 +4251,7 @@ els.testKeyBtn.addEventListener('click', async () => {
     els.testResult.textContent = `連線成功！模型 ${model} 可正常使用。`;
   } catch (err) {
     els.testResult.className = 'test-result err';
-    els.testResult.textContent = err.message;
+    els.testResult.textContent = redactSecrets(err?.message || '連線失敗');
   }
 });
 
@@ -4603,18 +4704,25 @@ if (els.confirmDriveUploadBtn) {
 // Settings: Personal Apps Script Bridge Controls
 function getFormDriveSecret() {
   const typed = els.driveSecretDisplay ? els.driveSecretDisplay.value.trim() : '';
-  return typed.length >= 8 ? typed : ensureDriveSecret();
+  if (!typed) return ensureDriveSecret();
+  if (typed.length < MIN_DRIVE_SECRET_LEN) return '';
+  return typed.slice(0, 128);
 }
 if (els.toggleDriveSecretBtn && els.driveSecretDisplay) {
   els.toggleDriveSecretBtn.addEventListener('click', () => {
     const isPwd = els.driveSecretDisplay.type === 'password';
     els.driveSecretDisplay.type = isPwd ? 'text' : 'password';
     els.toggleDriveSecretBtn.textContent = isPwd ? '隱藏' : '顯示';
+    if (isPwd) scheduleSensitiveMask();
   });
 }
 if (els.copyAppsScriptBtn) {
   els.copyAppsScriptBtn.addEventListener('click', async () => {
     const secret = getFormDriveSecret();
+    if (!secret) {
+      showToast(`私人密鑰至少需 ${MIN_DRIVE_SECRET_LEN} 碼，建議點「重產」產生高強度密鑰`, 3400);
+      return;
+    }
     settings.driveSecret = secret;
     saveState();
     const folderName = (els.driveFolderInput && els.driveFolderInput.value.trim()) || settings.driveFolderName || '隨身口譯官';
@@ -4647,6 +4755,13 @@ if (els.testDriveBtn) {
     const url = els.driveWebhookInput ? els.driveWebhookInput.value.trim() : '';
     const folderName = (els.driveFolderInput && els.driveFolderInput.value.trim()) || '隨身口譯官';
     const secret = getFormDriveSecret();
+    if (!secret) {
+      if (els.driveTestResult) {
+        els.driveTestResult.className = 'test-result err';
+        els.driveTestResult.textContent = `私人密鑰長度不足（至少需 ${MIN_DRIVE_SECRET_LEN} 碼），請先點「重產」或貼上正確密鑰。`;
+      }
+      return;
+    }
     if (els.driveTestResult) {
       els.driveTestResult.className = 'test-result';
       els.driveTestResult.textContent = '連線測試中⋯';
@@ -4666,7 +4781,7 @@ if (els.testDriveBtn) {
     } catch (err) {
       if (els.driveTestResult) {
         els.driveTestResult.className = 'test-result err';
-        els.driveTestResult.textContent = err.message;
+        els.driveTestResult.textContent = redactSecrets(err?.message || '連線測試失敗');
       }
     }
   });

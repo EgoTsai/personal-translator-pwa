@@ -747,26 +747,8 @@ export class AudioEngine {
     if (this.ctx.audioWorklet && typeof AudioWorkletNode !== 'undefined') {
       try {
         if (this._workletLoadedCtx !== this.ctx) {
-          const workletCode = `
-            class PcmCaptureProcessor extends AudioWorkletProcessor {
-              process(inputs) {
-                const input = inputs[0];
-                if (input && input[0] && input[0].length > 0) {
-                  this.port.postMessage(new Float32Array(input[0]));
-                }
-                return true;
-              }
-            }
-            registerProcessor('pcm-capture-processor', PcmCaptureProcessor);
-          `;
-          const blob = new Blob([workletCode], { type: 'application/javascript' });
-          const url = URL.createObjectURL(blob);
-          try {
-            await this.ctx.audioWorklet.addModule(url);
-            this._workletLoadedCtx = this.ctx;
-          } finally {
-            URL.revokeObjectURL(url);
-          }
+          await this.ctx.audioWorklet.addModule('./pcm-worklet.js?v=3.4.3');
+          this._workletLoadedCtx = this.ctx;
         }
         const node = new AudioWorkletNode(this.ctx, 'pcm-capture-processor');
         node.port.onmessage = (e) => this._handleAudioFrame(e.data);

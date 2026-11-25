@@ -5,8 +5,14 @@
  * and 24kHz PCM audio caching.
  */
 
-import { TARGET_LANGUAGES, TONE_PRESETS, formatGlossaryLine } from './gemini.js?v=3.4.2';
-import { uint8ToBase64, base64ToUint8 } from './audio.js?v=3.4.2';
+import {
+  TARGET_LANGUAGES,
+  TONE_PRESETS,
+  formatGlossaryLine,
+  isValidModelId,
+  redactSecrets,
+} from './gemini.js?v=3.4.3';
+import { uint8ToBase64, base64ToUint8 } from './audio.js?v=3.4.3';
 
 const LIVE_WS_ENDPOINT =
   'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
@@ -69,8 +75,13 @@ export class GeminiLiveClient {
       return Promise.reject(new Error('尚未設定 Gemini API Key'));
     }
 
+    const cleanModel = String(model || 'gemini-3.8-live').trim();
+    if (!isValidModelId(cleanModel)) {
+      return Promise.reject(new Error('無效的 Live 模型名稱設定，請在設定頁重新選擇'));
+    }
+
     this.intentionalClose = false;
-    this.model = model || 'gemini-3.8-live';
+    this.model = cleanModel;
     this._lastUsageTotals = null;
     this._resetTurnState();
 
@@ -104,8 +115,9 @@ export class GeminiLiveClient {
         ws = new WebSocket(wsUrl);
       } catch (err) {
         clearTimeout(timeoutId);
-        this._emitState('error', err.message);
-        fail(err);
+        const safeErr = redactSecrets(err?.message || '無法建立 Live WebSocket 連線');
+        this._emitState('error', safeErr);
+        fail(new Error(safeErr));
         return;
       }
 
@@ -150,7 +162,7 @@ export class GeminiLiveClient {
           ws.send(JSON.stringify(setupPayload));
         } catch (err) {
           clearTimeout(timeoutId);
-          fail(err);
+          fail(new Error(redactSecrets(err?.message || 'Live 初始化送出失敗')));
         }
       };
 
@@ -169,7 +181,7 @@ export class GeminiLiveClient {
             succeed();
           });
         } catch (err) {
-          console.error('Live message parse error:', err);
+          console.error('Live message parse error:', redactSecrets(err?.message || err));
         }
       };
 
@@ -189,7 +201,8 @@ export class GeminiLiveClient {
         this.ws = null;
 
         if (!this.intentionalClose) {
-          const reason = event.reason ? ` (${event.code}: ${event.reason})` : ` (code ${event.code})`;
+          const safeReason = redactSecrets(event.reason || '').slice(0, 180);
+          const reason = safeReason ? ` (${event.code}: ${safeReason})` : ` (code ${event.code})`;
           if (!wasSetup) {
             const errMsg =
               event.code === 1008

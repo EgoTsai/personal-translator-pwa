@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
   <meta
     http-equiv="Content-Security-Policy"
-    content="default-src 'self'; script-src 'self' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' https://generativelanguage.googleapis.com wss://generativelanguage.googleapis.com https://script.google.com https://script.googleusercontent.com https://*.googleusercontent.com; object-src 'none'; base-uri 'self'; form-action 'none';"
+    content="default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' https://generativelanguage.googleapis.com wss://generativelanguage.googleapis.com https://script.google.com https://script.googleusercontent.com; frame-src 'none'; child-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none';"
   />
   <meta name="referrer" content="strict-origin-when-cross-origin" />
   <title>隨身口譯官 — 英・日・瑞典 ↔ 中文專屬語音翻譯</title>
@@ -21,7 +21,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=3.4.2" />
+  <link rel="stylesheet" href="./styles.css?v=3.4.3" />
 </head>
 <body>
   <div class="app-shell" id="appShell">
@@ -31,9 +31,9 @@
         <div class="brand">
           <div class="brand-mark" aria-hidden="true">譯</div>
           <div class="brand-text">
-            <div class="brand-title-row" style="display:flex;align-items:center;gap:5px;white-space:nowrap;">
+            <div class="brand-title-row">
               <h1 class="brand-title">隨身口譯官</h1>
-              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v3.4.2</button>
+              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v3.4.3</button>
             </div>
             <div class="status-line">
               <span class="status-dot ready" id="statusDot"></span>
@@ -257,7 +257,7 @@
         <div class="field-group">
           <label class="field-label" for="apiKeyInput">
             <span>Gemini API Key</span>
-            <button type="button" id="toggleKeyVisibility" style="font-size:12px;color:var(--accent);font-weight:600;">顯示</button>
+            <button type="button" id="toggleKeyVisibility" class="key-toggle-btn">顯示</button>
           </label>
           <div class="input-row">
             <input
@@ -266,7 +266,10 @@
               class="text-control"
               placeholder="AIzaSy..."
               autocomplete="new-password"
+              autocapitalize="off"
+              autocorrect="off"
               spellcheck="false"
+              data-lpignore="true"
             />
             <button class="btn-secondary" id="testKeyBtn" type="button">測試連線</button>
           </div>
@@ -310,7 +313,7 @@
           </div>
 
           <div class="quota-progress-track" aria-hidden="true">
-            <div class="quota-progress-fill" id="quotaProgressFill" style="width:0%;"></div>
+            <div class="quota-progress-fill" id="quotaProgressFill"></div>
           </div>
           <div class="quota-summary-line" id="quotaSummaryText">本月累計約 NT$0.0 / NT$300（剩 NT$300.0・0 次呼叫）</div>
 
@@ -411,7 +414,7 @@
 
         <label class="setting-row">
           <span>
-            <strong style="display:block;font-size:13.5px;">進階：對話模式改用 Gemini Live 語音串流</strong>
+            <strong>進階：對話模式改用 Gemini Live 語音串流</strong>
             <span class="field-hint">最低延遲原生語音串流，但耗額度超過 Turbo 的 2x 上限（預設關閉；「聆聽翻譯」一律使用省額度連翻）</span>
           </span>
           <input type="checkbox" id="useLiveInDialogueCheck" />
@@ -437,7 +440,7 @@
 
         <label class="setting-row">
           <span>
-            <strong style="display:block;font-size:13.5px;">說話時即時顯示預覽字幕（免費）</strong>
+            <strong>說話時即時顯示預覽字幕（免費）</strong>
             <span class="field-hint">使用手機瀏覽器內建語音辨識邊說邊出草稿，送出後由 Gemini 精準譯文取代</span>
           </span>
           <input type="checkbox" id="draftCaptionCheck" checked />
@@ -445,7 +448,7 @@
 
         <label class="setting-row">
           <span>
-            <strong style="display:block;font-size:13.5px;">Live 模式即時唸出譯文</strong>
+            <strong>Live 模式即時唸出譯文</strong>
             <span class="field-hint">關閉時為靜音字幕（點 🔊 可 0 秒零延遲播放已快取語音）；開啟則同步播音</span>
           </span>
           <input type="checkbox" id="liveAutoSpeakCheck" />
@@ -453,7 +456,7 @@
 
         <label class="setting-row">
           <span>
-            <strong style="display:block;font-size:13.5px;">顯示外語原文對照</strong>
+            <strong>顯示外語原文對照</strong>
             <span class="field-hint">在中文譯文下方同步顯示聽到的英／日／瑞典原文</span>
           </span>
           <input type="checkbox" id="showOriginalCheck" checked />
@@ -492,7 +495,12 @@
                 id="driveSecretDisplay"
                 class="text-control quota-num-input"
                 autocomplete="new-password"
+                autocapitalize="off"
+                autocorrect="off"
                 spellcheck="false"
+                data-lpignore="true"
+                minlength="16"
+                maxlength="128"
               />
             </div>
           </div>
@@ -511,7 +519,7 @@
             </ol>
           </details>
 
-          <div class="field-group" style="gap:5px;">
+          <div class="field-group field-group-compact">
             <label class="quota-mini-label" for="driveWebhookInput">Apps Script 網頁應用程式網址</label>
             <div class="input-row">
               <input
@@ -520,6 +528,8 @@
                 class="text-control"
                 placeholder="https://script.google.com/macros/s/.../exec"
                 autocomplete="off"
+                autocapitalize="off"
+                autocorrect="off"
                 spellcheck="false"
               />
               <button class="btn-secondary" id="testDriveBtn" type="button">測試連線</button>
@@ -529,8 +539,8 @@
         </section>
 
         <div class="input-row">
-          <button class="btn-secondary" id="themeBtn" type="button" style="flex:1;">切換深淺主題</button>
-          <button class="btn-secondary" id="exportBtn" type="button" style="flex:1;">匯出對話紀錄</button>
+          <button class="btn-secondary flex-1" id="themeBtn" type="button">切換深淺主題</button>
+          <button class="btn-secondary flex-1" id="exportBtn" type="button">匯出對話紀錄</button>
         </div>
 
         <button class="btn-primary" id="saveSettingsBtn" type="button">儲存設定</button>
@@ -578,7 +588,7 @@
 
         <label class="setting-row">
           <span>
-            <strong style="display:block;font-size:13.5px;">✨ AI 自動擬標題＋3 點重點摘要</strong>
+            <strong>✨ AI 自動擬標題＋3 點重點摘要</strong>
             <span class="field-hint">在文件開頭加上重點摘要盒（約 NT$0.02），之後在 Drive 搜尋一目了然</span>
           </span>
           <input type="checkbox" id="exportAiSummaryCheck" checked />
@@ -594,7 +604,7 @@
 
         <label class="setting-row">
           <span>
-            <strong style="display:block;font-size:13.5px;">上傳成功後自動清空目前聆聽內容</strong>
+            <strong>上傳成功後自動清空目前聆聽內容</strong>
             <span class="field-hint">方便接著聽下一則新聞（若上傳失敗絕不會清空）</span>
           </span>
           <input type="checkbox" id="exportClearAfterCheck" />
@@ -604,7 +614,7 @@
 
         <div class="export-action-row">
           <button class="btn-secondary" id="copyBilingualTextBtn" type="button">複製中英全文</button>
-          <button class="btn-primary" id="confirmDriveUploadBtn" type="button" style="flex:1.5;">📄 建立並存入 Drive</button>
+          <button class="btn-primary flex-1-5" id="confirmDriveUploadBtn" type="button">📄 建立並存入 Drive</button>
         </div>
       </div>
     </div>
@@ -630,6 +640,6 @@
   <!-- Toast -->
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="./app.js?v=3.4.2"></script>
+  <script type="module" src="./app.js?v=3.4.3"></script>
 </body>
 </html>

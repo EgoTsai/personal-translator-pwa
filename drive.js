@@ -10,20 +10,24 @@
 
 const APPS_SCRIPT_URL_RE = /^https:\/\/script\.google\.com\/macros\/(?:u\/\d+\/)?s\/[A-Za-z0-9_-]{20,}\/(?:exec|dev)$/;
 const DOC_ID_RE = /^[A-Za-z0-9_-]{10,128}$/;
+export const MIN_DRIVE_SECRET_LEN = 16;
 
 export function generateDriveSecret(length = 28) {
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
-  const bytes = new Uint8Array(length);
-  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
-    crypto.getRandomValues(bytes);
-  } else {
-    for (let i = 0; i < length; i++) {
-      bytes[i] = Math.floor(Math.random() * 256);
-    }
+  const targetLen = Math.max(MIN_DRIVE_SECRET_LEN, Math.min(128, Number(length) || 28));
+  if (typeof crypto === 'undefined' || typeof crypto.getRandomValues !== 'function') {
+    throw new Error('瀏覽器不支援安全亂數產生器（Web Crypto API），無法產生私人密鑰。');
   }
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  const maxValid = Math.floor(256 / alphabet.length) * alphabet.length; // Unbiased rejection sampling
+  const buf = new Uint8Array(targetLen * 2);
   let out = '';
-  for (let i = 0; i < length; i++) {
-    out += alphabet[bytes[i] % alphabet.length];
+  while (out.length < targetLen) {
+    crypto.getRandomValues(buf);
+    for (let i = 0; i < buf.length && out.length < targetLen; i++) {
+      if (buf[i] < maxValid) {
+        out += alphabet[buf[i] % alphabet.length];
+      }
+    }
   }
   return out;
 }
@@ -91,7 +95,7 @@ export function normalizeGoogleDocUrl(docUrl, docId = '') {
 
 function sanitizeFolderName(name) {
   const cleaned = String(name || '')
-    .replace(/[\r\n\t/\\<>:"|?*]/g, ' ')
+    .replace(/[\x00-\x1f\x7f/\\<>:"|?*]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   return cleaned.slice(0, 60) || '隨身口譯官';
@@ -101,8 +105,7 @@ function escapeJsSingleQuoted(str) {
   return String(str || '')
     .replace(/\\/g, '\\\\')
     .replace(/'/g, "\\'")
-    .replace(/\r/g, '')
-    .replace(/\n/g, '');
+    .replace(/[\x00-\x1f\x7f\u2028\u2029]/g, '');
 }
 
 /**
@@ -114,7 +117,7 @@ export function buildAppsScriptCode({ secret = '', folderName = '隨身口譯官
   const safeFolder = escapeJsSingleQuoted(sanitizeFolderName(folderName));
 
   return `/**
- * 隨身口譯官 — 個人 Google Drive / Google Docs 自動建立橋接腳本
+ * 隨身口譯官 — 個人 Google Drive / Google Docs 自動建立橋接腳本（安全強化版）
  * 部署方式：
  *   1. 前往 https://script.new 貼上本程式碼並儲存
  *   2. 點右上角「部署」→「新增部署作業」→ 類型選「網頁應用程式」
@@ -123,16 +126,31 @@ export function buildAppsScriptCode({ secret = '', folderName = '隨身口譯官
  */
 const SECRET_TOKEN = '${safeSecret}';
 const DEFAULT_FOLDER_NAME = '${safeFolder}';
+const MAX_BODY_CHARS = 1500000;
+const MAX_PARAGRAPHS = 400;
+const MAX_PARA_CHARS = 8000;
 
 function safeEqual(a, b) {
   const s1 = String(a || '');
   const s2 = String(b || '');
-  if (!s1 || s1.length !== s2.length) return false;
-  let diff = 0;
-  for (let i = 0; i < s1.length; i++) {
-    diff |= s1.charCodeAt(i) ^ s2.charCodeAt(i);
+  if (s2.length < 16) return false;
+  const maxLen = Math.max(s1.length, s2.length);
+  let diff = s1.length ^ s2.length;
+  for (let i = 0; i < maxLen; i++) {
+    const c1 = i < s1.length ? s1.charCodeAt(i) : 0;
+    const c2 = i < s2.length ? s2.charCodeAt(i) : 0;
+    diff |= c1 ^ c2;
   }
   return diff === 0;
+}
+
+function cleanSingleLine(str, maxLen, fallback) {
+  const cleaned = String(str || '')
+    .replace(/[\\x00-\\x1f\\x7f]/g, ' ')
+    .replace(/\\s+/g, ' ')
+    .trim()
+    .slice(0, maxLen);
+  return cleaned || fallback;
 }
 
 function jsonOut(obj) {
@@ -142,45 +160,56 @@ function jsonOut(obj) {
 }
 
 function getOrCreateFolder(name) {
-  const folderName = String(name || DEFAULT_FOLDER_NAME).trim() || DEFAULT_FOLDER_NAME;
+  const folderName = cleanSingleLine(String(name || '').replace(/[/\\\\<>:"|?*]/g, ' '), 60, DEFAULT_FOLDER_NAME);
   const iter = DriveApp.getFoldersByName(folderName);
   if (iter.hasNext()) return iter.next();
   return DriveApp.createFolder(folderName);
 }
 
 function doGet() {
-  return jsonOut({ ok: true, service: 'Personal Translator Drive Bridge', version: '1.0' });
+  return jsonOut({ ok: false, error: 'Method not allowed' });
 }
 
 function doPost(e) {
   try {
-    const raw = e && e.postData && e.postData.contents ? e.postData.contents : '{}';
+    const raw = e && e.postData && e.postData.contents ? String(e.postData.contents) : '{}';
+    if (raw.length > MAX_BODY_CHARS) {
+      return jsonOut({ ok: false, error: '傳入內容超過上限。' });
+    }
     const data = JSON.parse(raw);
 
-    if (!safeEqual(data.secret, SECRET_TOKEN)) {
+    if (!data || typeof data !== 'object' || !safeEqual(data.secret, SECRET_TOKEN)) {
       return jsonOut({ ok: false, error: '密鑰驗證失敗，請確認設定頁與 Apps Script 的密鑰一致。' });
     }
 
-    const folderName = String(data.folderName || DEFAULT_FOLDER_NAME).trim() || DEFAULT_FOLDER_NAME;
+    const folderName = cleanSingleLine(String(data.folderName || '').replace(/[/\\\\<>:"|?*]/g, ' '), 60, DEFAULT_FOLDER_NAME);
 
     if (data.action === 'ping') {
       const folder = getOrCreateFolder(folderName);
-      return jsonOut({ ok: true, folderName: folder.getName(), version: '1.0' });
+      return jsonOut({ ok: true, folderName: folder.getName(), version: '1.1' });
     }
 
     if (data.action !== 'createDoc') {
-      return jsonOut({ ok: false, error: '不支援的操作類型：' + String(data.action || '') });
+      return jsonOut({ ok: false, error: '不支援的操作類型' });
     }
 
-    const docTitle = String(data.title || '隨身口譯官翻譯紀錄').trim().slice(0, 140);
-    const createdAt = String(data.createdAt || '').trim();
-    const modeLabel = String(data.modeLabel || '聆聽翻譯（中英對照）').trim();
+    const docTitle = cleanSingleLine(data.title, 140, '隨身口譯官翻譯紀錄');
+    const createdAt = cleanSingleLine(data.createdAt, 64, '');
+    const modeLabel = cleanSingleLine(data.modeLabel, 64, '聆聽翻譯（中英對照）');
     const layout = data.layout === 'appendix' ? 'appendix' : 'bilingual';
     const summaryBullets = Array.isArray(data.summaryBullets)
-      ? data.summaryBullets.map(function (s) { return String(s || '').trim(); }).filter(Boolean).slice(0, 5)
+      ? data.summaryBullets.map(function (s) { return cleanSingleLine(s, 260, ''); }).filter(Boolean).slice(0, 5)
       : [];
     const paragraphs = Array.isArray(data.paragraphs)
-      ? data.paragraphs.filter(function (p) { return p && (p.zh || p.orig); })
+      ? data.paragraphs
+          .filter(function (p) { return p && (p.zh || p.orig); })
+          .slice(0, MAX_PARAGRAPHS)
+          .map(function (p) {
+            return {
+              zh: String(p.zh || '').trim().slice(0, MAX_PARA_CHARS),
+              orig: String(p.orig || '').trim().slice(0, MAX_PARA_CHARS),
+            };
+          })
       : [];
 
     if (!paragraphs.length) {
@@ -322,9 +351,16 @@ async function postToDriveBridge(webhookUrl, payload, timeoutMs = 28000) {
   if (!isValidAppsScriptUrl(url)) {
     throw new Error('Google Apps Script 網址格式不正確，須為 https://script.google.com/macros/s/.../exec');
   }
-  if (!payload || !String(payload.secret || '').trim()) {
-    throw new Error('尚未設定私人密鑰，請先於設定頁複製並部署 Apps Script。');
+  const secretStr = String(payload?.secret || '').trim();
+  if (secretStr.length < MIN_DRIVE_SECRET_LEN) {
+    throw new Error(`私人密鑰長度不足（至少需 ${MIN_DRIVE_SECRET_LEN} 碼），請先於設定頁產生並部署 Apps Script。`);
   }
+
+  const redactBridgeText = (s) =>
+    String(s || '')
+      .replaceAll(secretStr, '[REDACTED]')
+      .replace(/AKfycb[0-9A-Za-z_-]{16,}/g, '[REDACTED_SCRIPT_ID]')
+      .slice(0, 260);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -356,7 +392,7 @@ async function postToDriveBridge(webhookUrl, payload, timeoutMs = 28000) {
     }
 
     if (!data || data.ok !== true) {
-      throw new Error(String(data?.error || '雲端建立 Google Doc 失敗，請稍後再試。'));
+      throw new Error(redactBridgeText(data?.error || '雲端建立 Google Doc 失敗，請稍後再試。'));
     }
 
     return data;
@@ -364,13 +400,13 @@ async function postToDriveBridge(webhookUrl, payload, timeoutMs = 28000) {
     if (err && err.name === 'AbortError') {
       throw new Error('連線逾時，請確認網路狀態後重試。');
     }
-    const msg = String(err?.message || err || '');
+    const msg = redactBridgeText(err?.message || err || '');
     if (/failed to fetch|load failed|networkerror/i.test(msg)) {
       throw new Error(
         '連線被阻擋（Failed to fetch）：請在 Apps Script「部署 → 管理部署作業」確認「誰可以存取」已改為「所有人（Anyone）」，且存檔後有部署「新版本」。'
       );
     }
-    throw err;
+    throw new Error(msg || '雲端上傳發生錯誤，請稍後再試。');
   } finally {
     clearTimeout(timer);
   }

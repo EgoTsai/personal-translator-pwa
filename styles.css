@@ -1,5 +1,5 @@
 /* ============================================================================
-   隨身口譯官 v3.4.2 — Apple iOS / visionOS-Inspired Design System
+   隨身口譯官 v3.4.3 — Apple iOS / visionOS-Inspired Design System
    Continuous squircle & capsule geometry, frosted vibrancy materials,
    viewport-locked fixed top navigation, silky GPU mode transitions,
    and AAA light/dark contrast.
@@ -3137,6 +3137,41 @@ button {
   display: flex;
   align-items: center;
   gap: 9px;
+}
+
+/* CSP-safe layout helpers (zero inline style attributes in index.html) */
+.brand-title-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.key-toggle-btn {
+  font-size: 12px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.quota-progress-fill {
+  width: 0%;
+}
+
+.setting-row > span > strong {
+  display: block;
+  font-size: 13.5px;
+}
+
+.field-group-compact {
+  gap: 5px;
+}
+
+.flex-1 {
+  flex: 1;
+}
+
+.flex-1-5 {
+  flex: 1.5;
 }
 
 /* Accessibility: Respect OS Reduced Motion Preference */

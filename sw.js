@@ -1,13 +1,14 @@
-const CACHE_NAME = 'personal-translator-v3.4.2';
+const CACHE_NAME = 'personal-translator-v3.4.3';
 const APP_SHELL = [
   './',
   './index.html',
-  './styles.css?v=3.4.2',
-  './app.js?v=3.4.2',
-  './audio.js?v=3.4.2',
-  './gemini.js?v=3.4.2',
-  './live.js?v=3.4.2',
-  './drive.js?v=3.4.2',
+  './styles.css?v=3.4.3',
+  './app.js?v=3.4.3',
+  './audio.js?v=3.4.3',
+  './pcm-worklet.js?v=3.4.3',
+  './gemini.js?v=3.4.3',
+  './live.js?v=3.4.3',
+  './drive.js?v=3.4.3',
   './manifest.json',
   './icon.svg',
   './icon-192.png',
@@ -32,8 +33,11 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  // Strictly skip non-GET and ALL cross-origin requests (Gemini API, fonts, etc.)
-  if (event.request.method !== 'GET' || url.origin !== self.location.origin) {
+  // Strictly skip non-GET, cross-origin requests, and non-HTTPS (except local dev loopback)
+  const isSafeProtocol =
+    url.protocol === 'https:' ||
+    (url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1'));
+  if (event.request.method !== 'GET' || url.origin !== self.location.origin || !isSafeProtocol) {
     return;
   }
 
@@ -43,7 +47,12 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     fetch(fetchReq)
       .then((resp) => {
-        if (resp && resp.status === 200 && url.origin === self.location.origin) {
+        if (
+          resp &&
+          resp.status === 200 &&
+          resp.type === 'basic' &&
+          url.origin === self.location.origin
+        ) {
           const copy = resp.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
         }
