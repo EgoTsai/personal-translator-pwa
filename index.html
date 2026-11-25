@@ -15,7 +15,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=2.6" />
+  <link rel="stylesheet" href="./styles.css?v=2.7" />
 </head>
 <body>
   <div class="app-shell" id="appShell">
@@ -27,7 +27,7 @@
           <div class="brand-text">
             <div class="brand-title-row" style="display:flex;align-items:center;gap:5px;white-space:nowrap;">
               <h1 class="brand-title">隨身口譯官</h1>
-              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v2.6</button>
+              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v2.7</button>
             </div>
             <div class="status-line">
               <span class="status-dot ready" id="statusDot"></span>
@@ -85,7 +85,7 @@
       </nav>
     </header>
 
-    <!-- Dual Scenario Switcher: 對話 (Bidirectional Auto) & 聆聽翻譯 (2-3 Sentence News/Lecture Continuous) -->
+    <!-- Dual Scenario Switcher: 對話 (Bidirectional Auto) & 聆聽翻譯 (Full-Screen Continuous Chinese + Retroactive Refinement) -->
     <section class="switch-deck" aria-label="情境模式選擇">
       <button class="switch-card dialogue-switch-card" id="dialogueSwitch" type="button" role="switch" aria-checked="false" title="自動聆聽雙向對話：外語自動翻中文、中文自動翻目標外語">
         <div class="switch-meta">
@@ -95,10 +95,10 @@
         <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
       </button>
 
-      <button class="switch-card broadcast-switch-card" id="broadcastSwitch" type="button" role="switch" aria-checked="false" title="連續收聽新聞／演講／Podcast：每 2-3 句自動整段翻譯成中文">
+      <button class="switch-card broadcast-switch-card" id="broadcastSwitch" type="button" role="switch" aria-checked="false" title="全畫面連續純中文翻譯：新聞／演講／Podcast，自動回頭潤飾前句語意">
         <div class="switch-meta">
           <span class="switch-label">📻 聆聽翻譯</span>
-          <span class="switch-sub" id="broadcastSub">2-3句連翻・省額度</span>
+          <span class="switch-sub" id="broadcastSub">純中文連翻・自動潤飾</span>
         </div>
         <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
       </button>
@@ -125,7 +125,7 @@
       </div>
     </div>
 
-    <!-- Transcript Stream -->
+    <!-- Dialogue Transcript Stream -->
     <main class="transcript-feed" id="transcriptFeed" aria-live="polite">
       <div class="empty-state" id="emptyState">
         <div class="empty-icon" aria-hidden="true">
@@ -137,10 +137,34 @@
           </svg>
         </div>
         <h2 class="empty-title">隨時開始口譯</h2>
-        <p class="empty-desc">開啟「💬 對話」自動雙向口譯、開啟「📻 聆聽翻譯」2–3 句連翻新聞演講，或按住下方說話、點 📷 拍菜單。</p>
+        <p class="empty-desc">開啟「💬 對話」自動雙向口譯、開啟「📻 聆聽翻譯」全畫面純中文連翻與自動語意潤飾，或按住下方說話、點 📷 拍菜單。</p>
         <button class="demo-btn" id="emptyDemoBtn" type="button">載入示範對話</button>
       </div>
     </main>
+
+    <!-- Full-Screen Continuous Chinese Broadcast Reader (Scenario 2: 聆聽翻譯) -->
+    <section class="broadcast-view" id="broadcastView" aria-label="聆聽翻譯連續中文畫面">
+      <div class="broadcast-toolbar">
+        <span class="broadcast-hint" id="broadcastHint">純繁體中文・自動回頭潤飾語意</span>
+        <div class="broadcast-tools">
+          <button class="bc-tool-btn" id="bcFontBtn" type="button" title="切換閱讀字體大小">字級 中</button>
+          <button class="bc-tool-btn" id="bcPolishBtn" type="button" title="回頭潤飾目前段落語意">✨ 潤飾</button>
+          <button class="bc-tool-btn" id="bcCopyBtn" type="button" title="複製整篇中文譯文">複製</button>
+        </div>
+      </div>
+      <div class="broadcast-canvas bc-font-md" id="broadcastCanvas" aria-live="polite">
+        <div class="broadcast-empty" id="broadcastEmpty">
+          <div class="empty-icon broadcast-empty-icon" aria-hidden="true">📻</div>
+          <h2 class="empty-title">全畫面連續中文聆聽翻譯</h2>
+          <p class="empty-desc">只顯示流暢繁體中文，不夾雜英文割裂視線。每聽到後續新句子時，系統會自動回頭修改前段語序與語意。</p>
+          <button class="demo-btn" id="bcDemoBtn" type="button">體驗連翻與回頭潤飾效果</button>
+        </div>
+      </div>
+      <div class="broadcast-paused-bar" id="broadcastPausedBar">
+        <button class="bc-resume-btn" id="bcResumeBtn" type="button">📻 繼續聆聽翻譯</button>
+        <button class="bc-back-btn" id="bcBackToChatBtn" type="button">💬 返回對話</button>
+      </div>
+    </section>
 
     <!-- Minimalist Single-Thumb Bottom Dock -->
     <footer class="bottom-dock">
@@ -364,6 +388,6 @@
   <!-- Toast -->
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="./app.js?v=2.6"></script>
+  <script type="module" src="./app.js?v=2.7"></script>
 </body>
 </html>

@@ -608,8 +608,216 @@ export async function interpretDialogueAudio({
 }
 
 /**
- * Scenario 2: Continuous Listening / Broadcast Interpreter ("聆聽翻譯" 模式 — 新聞・演講・Podcast)
- * - Non-Chinese speech (typically 2–3 sentences per batch) -> coherent Traditional Chinese (zh-TW) paragraph + original text
+ * Scenario 2 (Primary): Continuous Chinese-Only Broadcast Interpreter ("聆聽翻譯" 連續純中文＋回頭潤飾)
+ * - Outputs ONLY natural Traditional Chinese (no foreign transcript -> ~50% fewer output tokens & 2x faster TTFT!)
+ * - Single-pass rolling semantic self-correction: receives `prevTailText` so when the next audio chunk clarifies
+ *   clause order (SVO/SOV inversion), cut sentences, pronouns, or proper nouns, it returns `revised_prev` in the
+ *   exact same API call (zero extra API cost in Standard mode!).
+ */
+export async function interpretBroadcastAudio({
+  apiKey,
+  model,
+  wavBase64,
+  mimeType = 'audio/wav',
+  preferredLang = 'en',
+  prevTailText = '',
+  priorContext = '',
+  onStream = null,
+  signal,
+}) {
+  const langInfo = TARGET_LANGUAGES[preferredLang] || TARGET_LANGUAGES.en;
+  const cleanPrev = String(prevTailText || '').trim();
+  const cleanPrior = String(priorContext || '').trim();
+
+  const systemInstruction = `你是頂尖同步口譯與新聞即時翻譯專家。使用者正在連續收聽外語新聞、Podcast、影片或演講（主要可能為${langInfo.label}／英／日／瑞典或其他外語），畫面上**只需要流暢連貫的繁體中文（台灣慣用語）**，不要輸出外語原文。
+
+請嚴格遵守以下規則：
+1. **極速直譯為自然繁體中文**：
+   - 聽到外語時，直接翻成流暢、好讀、像台灣新聞或專業字幕的繁體中文，絕不可夾雜整句外語原文或日文假名（專有名詞縮寫如 AI、GDP、NATO 除外）。
+   - 若聽到中文，直接保留自然繁體中文原話。
+2. **回頭修正前段語意（極重要！）**：
+   - 若下方有提供【前段尾端譯文】，代表那是剛翻完的上一小段（可能剛好切在句子中間，或因英／日文語序倒裝導致當時翻得不夠通順）。
+   - 聽完這段新音訊後，若你發現新語境讓前段可以變得更通順、更精準（例如修正倒裝語序、補齊被切斷的後半句、修正專有名詞或人稱代名詞），請在 \`revised_prev\` 輸出**潤飾修改後的完整前段繁體中文**，並在 \`current_zh\` 只輸出緊接其後的剩餘新譯文（兩者直接拼在一起就是完全通順的文章，**不可重複也不可漏譯**）。
+   - 若【前段尾端譯文】已經完整通順不需修改，請將 \`revised_prev\` 設為空字串 \`""\`，只在 \`current_zh\` 輸出這段新音訊的繁體中文。
+   - 若這段新音訊開頭因無縫收音與前段最後 1–2 個字重疊，請自然銜接、不要重複翻譯。
+3. **智慧分段（\`new_paragraph\`）**：
+   - 若明顯切換新新聞主題、新講者長段發言或話題轉折，\`new_paragraph\` 設為 \`true\`；若是同一主題的延續，設為 \`false\`，讓中文自然連成流暢段落。
+4. **過濾雜訊**：
+   - 若音訊只有音樂、空白、雜音或無有效語音，回傳 \`{"revised_prev":"","current_zh":"","new_paragraph":false}\`，勿捏造。
+5. 只輸出符合 schema 的 JSON。`;
+
+  const promptParts = [];
+  if (cleanPrior) {
+    promptParts.push(`【更早的前文脈絡（唯讀參考，保持專有名詞一致）】\n${cleanPrior}`);
+  }
+  if (cleanPrev) {
+    promptParts.push(
+      `【前段尾端譯文（若新音訊讓語意更清楚或原本語序不順，可在 revised_prev 回頭修改這段）】\n${cleanPrev}`
+    );
+  }
+  promptParts.push('請聆聽新音訊，以最流暢的繁體中文接續翻譯（必要時透過 revised_prev 回頭潤飾前段），輸出 JSON。');
+
+  const payload = {
+    systemInstruction: {
+      parts: [{ text: systemInstruction }],
+    },
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          {
+            inlineData: {
+              mimeType,
+              data: wavBase64,
+            },
+          },
+          { text: promptParts.join('\n\n') },
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.15,
+      ...buildThinkingConfig(model),
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'OBJECT',
+        properties: {
+          revised_prev: {
+            type: 'STRING',
+            description: '若需要回頭修改潤飾「前段尾端譯文」，填入完整修正後的繁體中文；不需修改則留空字串 ""',
+          },
+          current_zh: {
+            type: 'STRING',
+            description: '新音訊接續的流暢繁體中文譯文（絕不留外語原文，不可與 revised_prev 重複）',
+          },
+          new_paragraph: {
+            type: 'BOOLEAN',
+            description: '是否換新主題段落',
+          },
+        },
+        required: ['revised_prev', 'current_zh', 'new_paragraph'],
+      },
+    },
+  };
+
+  const raw = await generateJsonWithStreamingFallback({
+    apiKey,
+    model,
+    payload,
+    onPartialText:
+      typeof onStream === 'function'
+        ? (partial) => {
+            const revisedPrev = extractPartialJsonStringField(partial, 'revised_prev');
+            const currentZh = extractPartialJsonStringField(partial, 'current_zh');
+            if (revisedPrev || currentZh) {
+              onStream({ revisedPrev, currentZh });
+            }
+          }
+        : null,
+    signal,
+  });
+
+  const parsed = safeJsonParse(raw);
+  if (!parsed) return null;
+
+  let revisedPrev = cleanPrev ? String(parsed.revised_prev || '').trim() : '';
+  let currentZh = String(parsed.current_zh || '').trim();
+  const newParagraph = Boolean(parsed.new_paragraph);
+
+  // Guardrail: reject malformed or untranslated revised_prev so we never corrupt prior good Chinese
+  if (revisedPrev) {
+    const tooShort = cleanPrev.length >= 16 && revisedPrev.length < Math.floor(cleanPrev.length * 0.4);
+    if (revisedPrev === cleanPrev || tooShort || looksUntranslatedForZh(revisedPrev, '', preferredLang)) {
+      revisedPrev = '';
+    }
+  }
+
+  // Guardrail: rescue if raw foreign text accidentally leaked into current_zh
+  if (currentZh && looksUntranslatedForZh(currentZh, '', preferredLang)) {
+    try {
+      const rescued = await rescueTranslateToZhTW({
+        apiKey,
+        model,
+        text: currentZh,
+        sourceLang: preferredLang,
+        signal,
+      });
+      if (rescued) currentZh = rescued.trim();
+    } catch (_) {}
+  }
+
+  if (!revisedPrev && !currentZh) return null;
+
+  return {
+    revisedPrev,
+    currentZh,
+    newParagraph,
+  };
+}
+
+/**
+ * Ultra-lightweight text-only retroactive polisher (~150 tokens, ~0.1x cost of an audio call).
+ * Used to smooth parallel Turbo broadcast bursts or polish a paragraph on demand without losing any facts.
+ */
+export async function polishBroadcastText({
+  apiKey,
+  model,
+  priorContext = '',
+  draftText,
+  signal,
+}) {
+  const cleanDraft = String(draftText || '').trim();
+  if (!cleanDraft || cleanDraft.length < 8) return null;
+  const cleanPrior = String(priorContext || '').trim();
+
+  const prompt = [
+    cleanPrior ? `【前文脈絡（唯讀參考，勿輸出）】\n${cleanPrior}` : '',
+    `【待潤飾的連續即時譯文草稿】\n${cleanDraft}`,
+    '請將上方草稿潤飾成完全通順、自然道地的台灣繁體中文：修正因分段收音造成的斷裂、語序倒裝、人稱／專有名詞不一致與重複字詞。**務必完整保留原本所有資訊與事實細節，絕對不可摘要或刪減內容**。只輸出 JSON。',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  const payload = {
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0.15,
+      ...buildThinkingConfig(model),
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'OBJECT',
+        properties: {
+          polished_zh: {
+            type: 'STRING',
+            description: '潤飾後完整流暢的台灣繁體中文（保留所有原始資訊）',
+          },
+        },
+        required: ['polished_zh'],
+      },
+    },
+  };
+
+  const data = await postGenerateContent(apiKey, model, payload, signal, 16000);
+  const raw = extractTextPart(data);
+  const parsed = safeJsonParse(raw);
+  const polished = String(parsed?.polished_zh || '').trim();
+
+  // Safety guard: never replace with empty, untranslated, or aggressively summarized text
+  if (
+    !polished ||
+    polished === cleanDraft ||
+    polished.length < Math.floor(cleanDraft.length * 0.55) ||
+    looksUntranslatedForZh(polished, '', 'en')
+  ) {
+    return null;
+  }
+
+  return polished;
+}
+
+/**
+ * Legacy / Multi-speaker Listening Interpreter (kept for compatibility)
+ * - Non-Chinese speech -> Traditional Chinese (zh-TW) + original text
  * - Chinese speech -> transcribe verbatim into Traditional Chinese
  * - Tag speakers consistently (A, B, C, ...)
  */

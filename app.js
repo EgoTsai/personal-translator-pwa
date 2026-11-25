@@ -2,23 +2,25 @@
  * app.js — Main UI controller for 隨身口譯官 PWA
  */
 
-import { AudioEngine } from './audio.js?v=2.6';
+import { AudioEngine } from './audio.js?v=2.7';
 import {
   TARGET_LANGUAGES,
   ICEBREAKER_BANNERS,
   interpretDialogueAudio,
-  interpretListeningAudio,
+  interpretBroadcastAudio,
+  polishBroadcastText,
   translateOutboundChinese,
   translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
-} from './gemini.js?v=2.6';
-import { GeminiLiveClient } from './live.js?v=2.6';
+} from './gemini.js?v=2.7';
+import { GeminiLiveClient } from './live.js?v=2.7';
 
 const STORAGE_KEYS = {
   settings: 'pt_settings_v1',
   messages: 'pt_messages_v1',
   speakers: 'pt_speakers_v1',
+  broadcast: 'pt_broadcast_v1',
 };
 
 const DEFAULT_SETTINGS = {
@@ -36,6 +38,7 @@ const DEFAULT_SETTINGS = {
   liveAutoSpeak: false,
   useLiveInDialogue: false,
   turboMode: false,
+  broadcastFontSize: 'md',
   targetLang: 'en',
   autoTts: false,
   theme: 'light',
@@ -59,6 +62,9 @@ const TONE_META = {
 };
 const TONE_ORDER = ['natural', 'polite', 'casual'];
 
+const BC_FONT_ORDER = ['sm', 'md', 'lg'];
+const BC_FONT_LABEL = { sm: '字級 小', md: '字級 中', lg: '字級 大' };
+
 // State + seamless settings migration across versions
 const storedSettings = loadJson(STORAGE_KEYS.settings, null);
 let settings = { ...DEFAULT_SETTINGS, ...(storedSettings || {}) };
@@ -76,9 +82,13 @@ if (storedSettings && Number(storedSettings.settingsVersion || 0) < 3) {
 
 let messages = loadJson(STORAGE_KEYS.messages, []);
 let speakerMemory = loadJson(STORAGE_KEYS.speakers, {}); // { A: { voiceHint, customName } }
+let broadcastParagraphs = loadJson(STORAGE_KEYS.broadcast, []); // [{ id, time, segments: [{ id, text, revised, settled, needsPolish }] }]
 
-// Scenario & engine state: activeMode is null | 'dialogue' | 'broadcast'
+// Scenario & view state:
+// - activeMode: null | 'dialogue' | 'broadcast' (whether mic is actively listening)
+// - viewMode: 'dialogue' | 'broadcast' (stays in full-screen Chinese reader even when broadcast is paused!)
 let activeMode = null;
+let viewMode = 'dialogue';
 let isLiveActive = false; // Optional Gemini Live WebSocket (only inside 'dialogue' when enabled in Settings)
 let liveConnected = false;
 let liveConnecting = false;
@@ -88,19 +98,27 @@ let liveIdleHandle = null;
 let liveInboundCount = 0;
 let sessionEpoch = 0; // Monotonic guard against rapid toggle race conditions
 let feedEpoch = 0; // Monotonic guard so cleared chats don't receive stale in-flight cards
+let bcEpoch = 0; // Monotonic guard so cleared broadcast canvas ignores stale jobs/polish
+let bcStreamText = '';
+let bcPolishBusy = false;
+let bcHintTimer = null;
+let bcDemoTimer = null;
 let isManualRecording = false;
 let manualTimerHandle = null;
 let manualStartTime = 0;
 let isOnline = typeof navigator !== 'undefined' && 'onLine' in navigator ? navigator.onLine : true;
 
-// Turbo ≤ 2x hard quota rate guardrail (sliding 60s window: max 12 auto-segments/min = 2x normal cadence)
-const MAX_TURBO_AUTO_PER_MIN = 12;
+// Turbo ≤ 2x hard quota rate guardrail (sliding 60s window: max 12 dialogue / 14 broadcast auto-segments/min)
+function getTurboMinuteLimit(mode) {
+  return mode === 'broadcast' ? 14 : 12;
+}
 const turboAutoEmitTimestamps = [];
 let turboThrottled = false;
 let turboCooldownTimer = null;
 
 /**
  * Pure scenario × Turbo parameter profile balancing Quota (strictly ≤ 2x) vs Speed/Efficiency.
+ * Broadcast outputs Chinese-only (~50% fewer output tokens & 2x faster TTFT) + single-pass retroactive smoothing!
  */
 export function getAudioProfile(mode, turbo, baseSilenceMs = 750, throttled = false) {
   const effectiveTurbo = Boolean(turbo && !throttled);
@@ -110,23 +128,23 @@ export function getAudioProfile(mode, turbo, baseSilenceMs = 750, throttled = fa
     return effectiveTurbo
       ? {
           mode: 'broadcast',
-          minBatchMs: 4500,
-          interSentencePauseMs: 300,
-          silenceMs: 1050,
-          maxChunkMs: 9500,
+          minBatchMs: 3200,
+          interSentencePauseMs: 260,
+          silenceMs: 900,
+          maxChunkMs: 7500,
           uploadSampleRate: 10000,
           maxConcurrency: 2,
           contextLimit: 2,
         }
       : {
           mode: 'broadcast',
-          minBatchMs: 9000,
-          interSentencePauseMs: 420,
-          silenceMs: 1700,
-          maxChunkMs: 17500,
+          minBatchMs: 5500,
+          interSentencePauseMs: 360,
+          silenceMs: 1400,
+          maxChunkMs: 12500,
           uploadSampleRate: 12000,
           maxConcurrency: 1,
-          contextLimit: 4,
+          contextLimit: 3,
         };
   }
 
@@ -164,10 +182,11 @@ const vadCommitQueue = [];
 let vadInFlight = 0;
 let vadJobSeq = 0;
 let pendingCount = 0;
+let broadcastPendingCount = 0;
 let activeShowcardMsg = null;
 let wakeLockSentinel = null;
 
-// Free browser live draft caption (SpeechRecognition)
+// Free browser live draft caption (SpeechRecognition — used ONLY in Dialogue / Manual mode, suppressed in Broadcast!)
 let draftRecognition = null;
 let draftRecognitionActive = false;
 let draftRecognitionDisabled = false;
@@ -242,6 +261,19 @@ const els = {
   transcriptFeed: $('transcriptFeed'),
   emptyState: $('emptyState'),
   emptyDemoBtn: $('emptyDemoBtn'),
+
+  broadcastView: $('broadcastView'),
+  broadcastHint: $('broadcastHint'),
+  bcFontBtn: $('bcFontBtn'),
+  bcPolishBtn: $('bcPolishBtn'),
+  bcCopyBtn: $('bcCopyBtn'),
+  broadcastCanvas: $('broadcastCanvas'),
+  broadcastEmpty: $('broadcastEmpty'),
+  bcDemoBtn: $('bcDemoBtn'),
+  broadcastPausedBar: $('broadcastPausedBar'),
+  bcResumeBtn: $('bcResumeBtn'),
+  bcBackToChatBtn: $('bcBackToChatBtn'),
+
   quickTextRow: $('quickTextRow'),
   quickChineseInput: $('quickChineseInput'),
   quickSendBtn: $('quickSendBtn'),
@@ -300,6 +332,7 @@ function saveState() {
   try {
     localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(settings));
     localStorage.setItem(STORAGE_KEYS.speakers, JSON.stringify(speakerMemory));
+    localStorage.setItem(STORAGE_KEYS.broadcast, JSON.stringify(broadcastParagraphs.slice(-60)));
   } catch (_) {}
 
   // Keep at most 120 messages and strip thumbnails from older photo cards to stay safely under storage quota
@@ -324,7 +357,6 @@ function saveState() {
     localStorage.setItem(STORAGE_KEYS.messages, JSON.stringify(buildPruned(6, 120)));
   } catch (_) {
     try {
-      // Fallback: strip all photo thumbnails and keep latest 60 text items
       localStorage.setItem(STORAGE_KEYS.messages, JSON.stringify(buildPruned(0, 60)));
     } catch (_) {}
   }
@@ -350,6 +382,17 @@ function makeId() {
 }
 
 // Theme & Appearance
+function applyBroadcastFont() {
+  const size = BC_FONT_ORDER.includes(settings.broadcastFontSize) ? settings.broadcastFontSize : 'md';
+  if (els.broadcastCanvas) {
+    els.broadcastCanvas.classList.remove('bc-font-sm', 'bc-font-md', 'bc-font-lg');
+    els.broadcastCanvas.classList.add(`bc-font-${size}`);
+  }
+  if (els.bcFontBtn) {
+    els.bcFontBtn.textContent = BC_FONT_LABEL[size] || '字級 中';
+  }
+}
+
 function applyTheme() {
   if (settings.theme === 'dark') {
     document.documentElement.setAttribute('data-theme', 'dark');
@@ -360,6 +403,22 @@ function applyTheme() {
     els.transcriptFeed.classList.remove('hide-originals');
   } else {
     els.transcriptFeed.classList.add('hide-originals');
+  }
+  applyBroadcastFont();
+}
+
+function syncViewModeUI() {
+  const isBcView = viewMode === 'broadcast';
+  if (els.appShell) {
+    els.appShell.classList.toggle('broadcast-immersive', isBcView);
+  }
+  if (els.broadcastPausedBar) {
+    els.broadcastPausedBar.classList.toggle('visible', isBcView && activeMode !== 'broadcast');
+  }
+  if (els.clearBtn) {
+    const title = isBcView ? '清除聆聽譯文' : '清除對話';
+    els.clearBtn.title = title;
+    els.clearBtn.setAttribute('aria-label', title);
   }
 }
 
@@ -393,13 +452,19 @@ function updateHeaderStatus() {
     }
     return;
   }
-  if (pendingCount > 0) {
+  if (bcPolishBusy) {
+    els.statusDot.classList.add('processing');
+    els.statusText.textContent = '✨ 正在回頭潤飾中文語意⋯';
+    return;
+  }
+  const totalPending = pendingCount + broadcastPendingCount;
+  if (totalPending > 0) {
     els.statusDot.classList.add('processing');
     if (settings.turboMode && !turboThrottled) {
       els.statusText.textContent =
-        pendingCount > 1 ? `⚡ Turbo 並行快翻 (${pendingCount})⋯` : '⚡ Turbo 極速翻譯中⋯';
+        totalPending > 1 ? `⚡ Turbo 並行快翻 (${totalPending})⋯` : '⚡ Turbo 極速翻譯中⋯';
     } else {
-      els.statusText.textContent = `Gemini 串流翻譯中 (${pendingCount})⋯`;
+      els.statusText.textContent = `Gemini 串流翻譯中 (${totalPending})⋯`;
     }
     return;
   }
@@ -416,14 +481,16 @@ function updateHeaderStatus() {
     els.statusDot.classList.add('listening');
     els.statusText.textContent = settings.turboMode
       ? turboThrottled
-        ? '📻 聆聽中・2x額度保護'
-        : '⚡ 聆聽快翻中・螢幕恆亮'
-      : '📻 聆聽連翻中・螢幕恆亮';
+        ? '📻 純中文連翻・2x保護'
+        : '⚡ 純中文極速連翻・螢幕恆亮'
+      : '📻 純中文連翻中・螢幕恆亮';
     return;
   }
   els.statusDot.classList.add('ready');
   if (!settings.apiKey) {
     els.statusText.textContent = '尚未設定 API Key';
+  } else if (viewMode === 'broadcast') {
+    els.statusText.textContent = '聆聽翻譯已暫停・純中文閱讀';
   } else {
     els.statusText.textContent = settings.turboMode ? '待命中・⚡ Turbo (≤2x)' : '待命中・標準省額度';
   }
@@ -464,7 +531,7 @@ function updateSwitchUI() {
     }
   }
 
-  // Scenario 2: 聆聽翻譯 (2–3 Sentence News/Lecture Continuous)
+  // Scenario 2: 聆聽翻譯 (Full-Screen Pure Chinese + Retroactive Semantic Refinement)
   const isBroadcastOn = activeMode === 'broadcast';
   if (els.broadcastSwitch) {
     els.broadcastSwitch.classList.toggle('broadcast-on', isBroadcastOn);
@@ -473,9 +540,9 @@ function updateSwitchUI() {
   if (els.broadcastSub) {
     if (isBroadcastOn) {
       els.broadcastSub.textContent =
-        settings.turboMode && !turboThrottled ? '⚡ 1-2句並行快翻中' : '2-3句連翻中・防休眠';
+        settings.turboMode && !turboThrottled ? '⚡ 純中文極速・自動潤飾' : '純中文連翻中・自動潤飾';
     } else {
-      els.broadcastSub.textContent = settings.turboMode ? '1-2句並行・Turbo' : '2-3句連翻・省額度';
+      els.broadcastSub.textContent = settings.turboMode ? '⚡ 1句快翻・自動潤飾' : '純中文連翻・自動潤飾';
     }
   }
 
@@ -491,7 +558,7 @@ function updateSwitchUI() {
     els.flushBtn.textContent = isLiveActive
       ? '送出此句'
       : isBroadcastOn
-        ? '立即翻這段'
+        ? '立即翻'
         : '立即送出';
   }
 
@@ -514,6 +581,7 @@ function updateSwitchUI() {
 
   // Setup banner
   els.setupBanner.classList.toggle('hidden', Boolean(settings.apiKey));
+  syncViewModeUI();
   updateHeaderStatus();
 }
 
@@ -1178,7 +1246,9 @@ const DRAFT_LOCALE_MAP = {
 };
 
 function startDraftRecognition(langCode = 'zh') {
-  if (!settings.draftCaption || draftRecognitionDisabled || isLiveActive) return;
+  if (!settings.draftCaption || draftRecognitionDisabled || isLiveActive || (activeMode === 'broadcast' && !isManualRecording)) {
+    return;
+  }
   const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRec) return;
 
@@ -1213,7 +1283,12 @@ function startDraftRecognition(langCode = 'zh') {
     };
 
     rec.onend = () => {
-      if (draftRecognitionActive && !draftRecognitionDisabled && (Boolean(activeMode) || isManualRecording) && !isLiveActive) {
+      if (
+        draftRecognitionActive &&
+        !draftRecognitionDisabled &&
+        (activeMode === 'dialogue' || isManualRecording) &&
+        !isLiveActive
+      ) {
         try {
           rec.start();
         } catch (_) {
@@ -1477,13 +1552,486 @@ function stopLiveSession(releaseMic = true) {
   }
 }
 
+// ============================================================================
+// Full-Screen Continuous Chinese Broadcast Canvas & Retroactive Semantic Polish
+// ============================================================================
+function isNearBroadcastBottom() {
+  const el = els.broadcastCanvas;
+  if (!el || typeof el.scrollHeight !== 'number' || typeof el.clientHeight !== 'number') return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 140;
+}
+
+let bcScrollRaf = false;
+function scrollBroadcastToBottom(force = false) {
+  if (!force && !isNearBroadcastBottom()) return;
+  if (bcScrollRaf) return;
+  bcScrollRaf = true;
+  requestAnimationFrame(() => {
+    bcScrollRaf = false;
+    if (els.broadcastCanvas) {
+      els.broadcastCanvas.scrollTop = els.broadcastCanvas.scrollHeight;
+    }
+  });
+}
+
+function flashBroadcastHint(text, duration = 2800) {
+  if (!els.broadcastHint) return;
+  els.broadcastHint.textContent = text;
+  els.broadcastHint.classList.add('revised-notice');
+  clearTimeout(bcHintTimer);
+  bcHintTimer = setTimeout(() => {
+    if (!els.broadcastHint) return;
+    els.broadcastHint.classList.remove('revised-notice');
+    els.broadcastHint.textContent = '純繁體中文・自動回頭潤飾語意';
+  }, duration);
+}
+
+function getBroadcastTailSegment() {
+  if (!Array.isArray(broadcastParagraphs) || broadcastParagraphs.length === 0) return null;
+  const para = broadcastParagraphs[broadcastParagraphs.length - 1];
+  if (!para || !Array.isArray(para.segments) || para.segments.length === 0) return null;
+  return { para, seg: para.segments[para.segments.length - 1] };
+}
+
+function findBroadcastSegmentById(segId) {
+  if (!segId) return null;
+  for (let i = broadcastParagraphs.length - 1; i >= 0; i--) {
+    const para = broadcastParagraphs[i];
+    if (!para || !Array.isArray(para.segments)) continue;
+    for (let j = para.segments.length - 1; j >= 0; j--) {
+      if (para.segments[j].id === segId) {
+        return { para, seg: para.segments[j], paraIdx: i, segIdx: j };
+      }
+    }
+  }
+  return null;
+}
+
+function getBroadcastPriorContext(excludeSegId = null, maxChars = 240) {
+  const chunks = [];
+  let total = 0;
+  for (let i = broadcastParagraphs.length - 1; i >= 0 && total < maxChars; i--) {
+    const para = broadcastParagraphs[i];
+    if (!para || !Array.isArray(para.segments)) continue;
+    for (let j = para.segments.length - 1; j >= 0 && total < maxChars; j--) {
+      const s = para.segments[j];
+      if (excludeSegId && s.id === excludeSegId) continue;
+      if (!s.text) continue;
+      chunks.unshift(s.text);
+      total += s.text.length;
+    }
+  }
+  const joined = chunks.join('');
+  return joined.length > maxChars ? joined.slice(-maxChars) : joined;
+}
+
+function getBroadcastFullText() {
+  return broadcastParagraphs
+    .map((p) => (p.segments || []).map((s) => s.text).join(''))
+    .filter((line) => line.trim())
+    .join('\n\n');
+}
+
+function createBroadcastSegSpan(seg, isLiveTail = false) {
+  const span = document.createElement('span');
+  span.className = `bc-seg${isLiveTail && !seg.settled ? ' live-tail' : ''}`;
+  span.dataset.sid = seg.id;
+  span.textContent = seg.text;
+  return span;
+}
+
+function createBroadcastParaElement(para, isLastPara = false) {
+  const p = document.createElement('p');
+  p.className = 'bc-para';
+  p.dataset.pid = para.id;
+  const segs = para.segments || [];
+  segs.forEach((seg, idx) => {
+    const isTail = isLastPara && idx === segs.length - 1;
+    p.appendChild(createBroadcastSegSpan(seg, isTail));
+  });
+  return p;
+}
+
+function renderBroadcastCanvas(forceScroll = true) {
+  const canvas = els.broadcastCanvas;
+  if (!canvas) return;
+  canvas.innerHTML = '';
+
+  if (broadcastParagraphs.length === 0 && !bcStreamText && broadcastPendingCount === 0) {
+    if (els.broadcastEmpty) canvas.appendChild(els.broadcastEmpty);
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  broadcastParagraphs.forEach((para, idx) => {
+    frag.appendChild(createBroadcastParaElement(para, idx === broadcastParagraphs.length - 1));
+  });
+  canvas.appendChild(frag);
+
+  if (bcStreamText) {
+    upsertBroadcastStreamSpan(bcStreamText);
+  } else if (broadcastPendingCount > 0) {
+    syncBroadcastPendingInline();
+  }
+
+  scrollBroadcastToBottom(forceScroll);
+}
+
+function getOrCreateActiveBroadcastParaEl() {
+  const canvas = els.broadcastCanvas;
+  if (!canvas) return null;
+  if (els.broadcastEmpty && els.broadcastEmpty.parentNode === canvas) {
+    els.broadcastEmpty.remove();
+  }
+  const paras = canvas.querySelectorAll('.bc-para');
+  if (paras.length > 0) {
+    return paras[paras.length - 1];
+  }
+  const temp = document.createElement('p');
+  temp.id = 'bcTempStreamPara';
+  temp.className = 'bc-para';
+  canvas.appendChild(temp);
+  return temp;
+}
+
+function upsertBroadcastStreamSpan(text) {
+  bcStreamText = String(text || '');
+  const canvas = els.broadcastCanvas;
+  if (!canvas) return;
+  if (!bcStreamText) {
+    clearBroadcastStreamSpan();
+    return;
+  }
+
+  const shouldScroll = isNearBroadcastBottom();
+  const pendingEl = document.getElementById('bcPendingInline');
+  if (pendingEl) pendingEl.remove();
+
+  let span = document.getElementById('bcStreamingSpan');
+  if (!span) {
+    const paraEl = getOrCreateActiveBroadcastParaEl();
+    if (!paraEl) return;
+    span = document.createElement('span');
+    span.id = 'bcStreamingSpan';
+    span.className = 'bc-seg bc-streaming';
+    const txt = document.createElement('span');
+    txt.className = 'bc-stream-text';
+    const cursor = document.createElement('span');
+    cursor.className = 'stream-cursor';
+    span.append(txt, cursor);
+    paraEl.appendChild(span);
+  }
+  const txtNode = span.querySelector('.bc-stream-text');
+  if (txtNode) txtNode.textContent = bcStreamText;
+
+  if (shouldScroll) scrollBroadcastToBottom(true);
+}
+
+function clearBroadcastStreamSpan() {
+  bcStreamText = '';
+  const span = document.getElementById('bcStreamingSpan');
+  if (span) span.remove();
+  const temp = document.getElementById('bcTempStreamPara');
+  if (temp && temp.children.length === 0) temp.remove();
+}
+
+function syncBroadcastPendingInline() {
+  const canvas = els.broadcastCanvas;
+  if (!canvas) return;
+  const existing = document.getElementById('bcPendingInline');
+  const shouldShow = broadcastPendingCount > 0 && !bcStreamText;
+
+  if (shouldShow) {
+    const shouldScroll = isNearBroadcastBottom();
+    if (!existing) {
+      const paraEl = getOrCreateActiveBroadcastParaEl();
+      if (!paraEl) return;
+      const badge = document.createElement('span');
+      badge.id = 'bcPendingInline';
+      badge.className = 'bc-pending-inline';
+      badge.innerHTML = `<span class="spinner"></span><span>翻譯中⋯</span>`;
+      paraEl.appendChild(badge);
+    }
+    if (shouldScroll) scrollBroadcastToBottom(true);
+  } else if (existing) {
+    existing.remove();
+    const temp = document.getElementById('bcTempStreamPara');
+    if (temp && temp.children.length === 0) temp.remove();
+    if (broadcastParagraphs.length === 0 && !bcStreamText && els.broadcastEmpty && els.broadcastEmpty.parentNode !== canvas) {
+      canvas.appendChild(els.broadcastEmpty);
+    }
+  }
+}
+
+function updateBroadcastSpanInPlace(segId, nextText, triggerGlow = false) {
+  const canvas = els.broadcastCanvas;
+  if (!canvas) return;
+  const spans = canvas.querySelectorAll('.bc-seg');
+  let target = null;
+  for (const s of spans) {
+    if (s.dataset && s.dataset.sid === segId) {
+      target = s;
+      break;
+    }
+  }
+  if (!target) {
+    renderBroadcastCanvas(false);
+    return;
+  }
+  target.textContent = nextText;
+  target.classList.remove('live-tail');
+  if (triggerGlow) {
+    target.classList.remove('revised-flash');
+    void target.offsetWidth; // restart CSS shimmer cleanly
+    target.classList.add('revised-flash');
+  }
+}
+
+function settleAllLiveTailSpansDom() {
+  if (!els.broadcastCanvas) return;
+  els.broadcastCanvas.querySelectorAll('.bc-seg.live-tail').forEach((el) => {
+    el.classList.remove('live-tail');
+  });
+}
+
+/**
+ * Commit a Chinese-only Broadcast result with surgical in-place retroactive refinement (revised_prev)
+ * and continuous inline paragraph flow (zero bubbles, zero English).
+ */
+export function applyBroadcastCommit(job, result) {
+  const shouldScroll = isNearBroadcastBottom();
+  clearBroadcastStreamSpan();
+  const pendingInline = document.getElementById('bcPendingInline');
+  if (pendingInline) pendingInline.remove();
+
+  let changed = false;
+
+  // 1. Apply single-pass retroactive semantic refinement to the previous tail segment (zero extra API call!)
+  if (job.prevTailSegId) {
+    const found = findBroadcastSegmentById(job.prevTailSegId);
+    if (found) {
+      found.seg.settled = true;
+      found.seg.needsPolish = false;
+      if (result.revisedPrev && result.revisedPrev !== found.seg.text) {
+        found.seg.text = result.revisedPrev;
+        found.seg.revised = true;
+        updateBroadcastSpanInPlace(found.seg.id, found.seg.text, true);
+        flashBroadcastHint('✨ 已依後續語境回頭潤飾前句語意');
+        changed = true;
+      } else {
+        updateBroadcastSpanInPlace(found.seg.id, found.seg.text, false);
+      }
+    }
+  }
+
+  // 2. Append newly translated Traditional Chinese continuously inline (or start a clean paragraph on topic shift)
+  if (result.currentZh) {
+    const canvas = els.broadcastCanvas;
+    if (canvas && els.broadcastEmpty && els.broadcastEmpty.parentNode === canvas) {
+      els.broadcastEmpty.remove();
+    }
+
+    const lastPara = broadcastParagraphs[broadcastParagraphs.length - 1] || null;
+    const lastParaLen = lastPara
+      ? lastPara.segments.reduce((acc, s) => acc + (s.text ? s.text.length : 0), 0)
+      : 0;
+    const shouldStartNewPara = !lastPara || result.newParagraph || lastParaLen >= 220;
+
+    // Mark previous live tails as settled
+    if (lastPara) {
+      for (const s of lastPara.segments) s.settled = true;
+    }
+    settleAllLiveTailSpansDom();
+
+    const newSeg = {
+      id: makeId(),
+      text: result.currentZh,
+      revised: false,
+      settled: false,
+      needsPolish: !job.hadPrevTail,
+    };
+
+    if (shouldStartNewPara) {
+      const para = {
+        id: makeId(),
+        time: nowTimeStr(),
+        segments: [newSeg],
+      };
+      broadcastParagraphs.push(para);
+      if (canvas) {
+        const temp = document.getElementById('bcTempStreamPara');
+        if (temp) temp.remove();
+        canvas.appendChild(createBroadcastParaElement(para, true));
+      }
+      while (broadcastParagraphs.length > 60) {
+        broadcastParagraphs.shift();
+        const firstP = canvas ? canvas.querySelector('.bc-para') : null;
+        if (firstP) firstP.remove();
+      }
+    } else {
+      lastPara.segments.push(newSeg);
+      if (canvas) {
+        const paras = canvas.querySelectorAll('.bc-para');
+        const lastParaEl = paras.length > 0 ? paras[paras.length - 1] : null;
+        if (lastParaEl && lastParaEl.dataset?.pid === lastPara.id) {
+          lastParaEl.appendChild(createBroadcastSegSpan(newSeg, true));
+        } else {
+          renderBroadcastCanvas(false);
+        }
+      }
+    }
+    changed = true;
+  }
+
+  if (changed) {
+    saveState();
+  }
+  if (shouldScroll) scrollBroadcastToBottom(true);
+}
+
+/**
+ * Lightweight text-only retroactive polisher (~0.1x cost of an audio call).
+ * Auto-triggered when Turbo parallel chunks finish out of sync, or manually via the "✨ 潤飾" button.
+ */
+async function polishBroadcastTail(manualTrigger = false) {
+  if (bcPolishBusy || !settings.apiKey || !isOnline) {
+    if (manualTrigger && !settings.apiKey) {
+      showToast('請先填入 Gemini API Key');
+      openSettings();
+    }
+    return;
+  }
+  if (broadcastParagraphs.length === 0) {
+    if (manualTrigger) showToast('目前沒有可潤飾的中文內容');
+    return;
+  }
+
+  const para = broadcastParagraphs[broadcastParagraphs.length - 1];
+  if (!para || !Array.isArray(para.segments) || para.segments.length === 0) return;
+
+  // Polish up to the last 3 segments (or whole current paragraph if manual)
+  const takeCount = manualTrigger ? para.segments.length : Math.min(3, para.segments.length);
+  const startIdx = para.segments.length - takeCount;
+  const targetSegs = para.segments.slice(startIdx);
+  const targetIds = targetSegs.map((s) => s.id);
+  const draftText = targetSegs.map((s) => s.text).join('').trim();
+  if (draftText.length < 10) {
+    if (manualTrigger) showToast('目前字數較短，已足夠通順');
+    return;
+  }
+
+  const myEpoch = bcEpoch;
+  bcPolishBusy = true;
+  if (els.bcPolishBtn) els.bcPolishBtn.classList.add('busy');
+  updateHeaderStatus();
+
+  try {
+    const priorContext = getBroadcastPriorContext(targetIds[0], 220);
+    const polished = await polishBroadcastText({
+      apiKey: settings.apiKey,
+      model: settings.model,
+      priorContext,
+      draftText,
+    });
+
+    if (myEpoch !== bcEpoch) return;
+
+    if (polished && polished !== draftText) {
+      // Ensure target segments still exist contiguously in `para`
+      const firstIdx = para.segments.findIndex((s) => s.id === targetIds[0]);
+      if (firstIdx >= 0) {
+        const mergedSeg = {
+          id: makeId(),
+          text: polished,
+          revised: true,
+          settled: true,
+          needsPolish: false,
+        };
+        para.segments.splice(firstIdx, targetIds.length, mergedSeg);
+        saveState();
+        renderBroadcastCanvas(false);
+        updateBroadcastSpanInPlace(mergedSeg.id, mergedSeg.text, true);
+        flashBroadcastHint('✨ 已回頭完成整段語意潤飾');
+        if (manualTrigger) showToast('✨ 已潤飾目前段落語意');
+      }
+    } else {
+      for (const s of targetSegs) {
+        s.needsPolish = false;
+        s.settled = true;
+      }
+      saveState();
+      if (manualTrigger) showToast('目前段落已經非常流暢自然');
+    }
+  } catch (err) {
+    console.warn('Broadcast polish skipped:', err);
+    if (manualTrigger) showToast(`潤飾失敗：${err.message}`, 3200);
+  } finally {
+    bcPolishBusy = false;
+    if (els.bcPolishBtn) els.bcPolishBtn.classList.remove('busy');
+    updateHeaderStatus();
+  }
+}
+
+function runBroadcastDemo() {
+  clearTimeout(bcDemoTimer);
+  viewMode = 'broadcast';
+  bcEpoch += 1;
+  const seg1Id = makeId();
+  broadcastParagraphs = [
+    {
+      id: makeId(),
+      time: nowTimeStr(),
+      segments: [
+        {
+          id: makeId(),
+          text: '歡迎收看今日國際財經快訊。全球市場本週高度關注歐美央行的利率動向與最新通膨報告。',
+          revised: false,
+          settled: true,
+          needsPolish: false,
+        },
+      ],
+    },
+    {
+      id: makeId(),
+      time: nowTimeStr(),
+      segments: [
+        {
+          id: seg1Id,
+          text: '歐洲央行今天宣布，儘管歐元區經濟成長低迷，他們可能暫時不會⋯',
+          revised: false,
+          settled: false,
+          needsPolish: false,
+        },
+      ],
+    },
+  ];
+  saveState();
+  syncViewModeUI();
+  renderBroadcastCanvas(true);
+  flashBroadcastHint('📻 正在收聽下一句，待語境完整後將自動回頭潤飾⋯', 1800);
+
+  // Demonstrate live retroactive self-correction + seamless inline continuation 1.3s later!
+  bcDemoTimer = setTimeout(() => {
+    applyBroadcastCommit(
+      { prevTailSegId: seg1Id, hadPrevTail: true },
+      {
+        revisedPrev: '歐洲央行今天宣布，儘管歐元區經濟成長低迷，仍決定連續第三次會議維持利率不變，',
+        currentZh: '並強調服務業通膨仍具黏性，短期內將審慎觀察後續經濟數據再決定降息時程。',
+        newParagraph: false,
+      }
+    );
+    showToast('✨ 已示範：純中文連續顯示＋自動回頭修改前句語意！', 3400);
+  }, 1300);
+}
+
 // Turbo ≤ 2x quota guardrail helpers
 function pruneTurboWindow(now = Date.now()) {
   const cutoff = now - 60000;
   while (turboAutoEmitTimestamps.length > 0 && turboAutoEmitTimestamps[0] < cutoff) {
     turboAutoEmitTimestamps.shift();
   }
-  const shouldThrottle = Boolean(settings.turboMode && turboAutoEmitTimestamps.length >= MAX_TURBO_AUTO_PER_MIN);
+  const limit = getTurboMinuteLimit(activeMode || 'dialogue');
+  const shouldThrottle = Boolean(settings.turboMode && turboAutoEmitTimestamps.length >= limit);
   if (turboThrottled && !shouldThrottle) {
     turboThrottled = false;
     applyActiveAudioProfile();
@@ -1496,13 +2044,14 @@ function pruneTurboWindow(now = Date.now()) {
   return shouldThrottle;
 }
 
-function recordTurboAutoEmit() {
+function recordTurboAutoEmit(mode) {
   if (!settings.turboMode) return;
   const now = Date.now();
   pruneTurboWindow(now);
   turboAutoEmitTimestamps.push(now);
 
-  if (turboAutoEmitTimestamps.length >= MAX_TURBO_AUTO_PER_MIN) {
+  const limit = getTurboMinuteLimit(mode || activeMode || 'dialogue');
+  if (turboAutoEmitTimestamps.length >= limit) {
     const wasThrottled = turboThrottled;
     turboThrottled = true;
     applyActiveAudioProfile();
@@ -1542,12 +2091,12 @@ function getIdleVadHint() {
   const shortTarget = LANG_BADGE_MAP[langInfo.code] || langInfo.label;
   if (activeMode === 'broadcast') {
     if (settings.turboMode && !turboThrottled) {
-      return '⚡ Turbo 聆聽中⋯每 1–2 句並行快翻（≤2x 額度）';
+      return '⚡ Turbo 純中文極速連翻中⋯自動回頭潤飾（≤2x）';
     }
     if (settings.turboMode && turboThrottled) {
-      return '📻 聆聽中（2x 額度保護中・每 2–3 句自動翻）';
+      return '📻 純中文連翻中（2x 額度保護中・自動潤飾）';
     }
-    return '📻 聆聽新聞／演講中⋯滿 2–3 句自動連翻';
+    return '📻 純中文連續聆聽中⋯自動回頭潤飾前句語意';
   }
   if (settings.turboMode && !turboThrottled) {
     return `⚡ Turbo 雙向對話（中↔${shortTarget}）⋯停頓即並行快翻`;
@@ -1580,7 +2129,7 @@ function toggleTurboMode() {
     if (activeMode === 'dialogue' && isLiveActive) {
       showToast('⚡ Turbo 已開啟（已記憶；目前為 Live 進階串流）', 2600);
     } else if (activeMode === 'broadcast') {
-      showToast('⚡ Turbo 開啟：縮短為 1–2 句並雙路並行快翻（額度 ≤ 2x）', 3000);
+      showToast('⚡ Turbo 開啟：1 句極速純中文＋自動回頭潤飾（額度 ≤ 2x）', 3000);
     } else {
       showToast('⚡ Turbo 開啟：極速斷句＋雙路並行快翻（額度上限 ≤ 2x）', 3000);
     }
@@ -1589,12 +2138,14 @@ function toggleTurboMode() {
   }
 }
 
-// Dual Scenario Switcher: 'dialogue' (自動雙向對話) & 'broadcast' (新聞／演講 2–3 句連翻)
+// Dual Scenario Switcher:
+// - 'dialogue' (自動雙向對話，標準對話氣泡視圖)
+// - 'broadcast' (全畫面純中文連續聆聽＋自動回頭潤飾，無英文干擾)
 async function toggleScenario(targetMode) {
   audio.unlockPlayback();
   const epoch = ++sessionEpoch;
 
-  // Tapping the already-active scenario turns listening OFF
+  // Tapping the already-active scenario pauses listening
   if (activeMode === targetMode) {
     const prevMode = activeMode;
     if (isLiveActive) {
@@ -1608,11 +2159,27 @@ async function toggleScenario(targetMode) {
     haptic(10);
     syncWakeLock();
     updateSwitchUI();
-    showToast(prevMode === 'broadcast' ? '已關閉「聆聽翻譯」' : '已關閉「對話」模式');
+
+    if (prevMode === 'broadcast') {
+      // Keep full-screen Chinese reading view open so user can read/copy, and polish any unpolished Turbo tail!
+      const lastPara = broadcastParagraphs[broadcastParagraphs.length - 1];
+      if (lastPara && lastPara.segments.some((s) => s.needsPolish)) {
+        polishBroadcastTail(false);
+      }
+      showToast('已暫停聆聽翻譯（可繼續閱讀或複製全文）');
+    } else {
+      showToast('已關閉「對話」模式');
+    }
     return;
   }
 
   if (!settings.apiKey) {
+    // Allow switching into Broadcast canvas preview if they tapped Broadcast without API key? Better: prompt key as before
+    if (targetMode === 'broadcast') {
+      viewMode = 'broadcast';
+      renderBroadcastCanvas(true);
+      updateSwitchUI();
+    }
     showToast('請先填入 Gemini API Key 才能啟動自動翻譯');
     openSettings();
     return;
@@ -1631,6 +2198,8 @@ async function toggleScenario(targetMode) {
   } else if (switchingFromLive) {
     stopLiveSession(false);
   }
+
+  viewMode = targetMode;
 
   const wantsLive = targetMode === 'dialogue' && Boolean(settings.useLiveInDialogue);
 
@@ -1665,7 +2234,14 @@ async function toggleScenario(targetMode) {
       if (epoch !== sessionEpoch) return;
     }
 
-    startDraftRecognition(settings.targetLang);
+    if (targetMode === 'broadcast') {
+      // Suppress browser SpeechRecognition in Broadcast so ZERO raw English drafts appear on screen!
+      stopDraftRecognition(true);
+      renderBroadcastCanvas(true);
+    } else {
+      startDraftRecognition(settings.targetLang);
+    }
+
     haptic(15);
     syncWakeLock();
     els.vadStatus.textContent = getIdleVadHint();
@@ -1675,8 +2251,8 @@ async function toggleScenario(targetMode) {
     if (targetMode === 'broadcast') {
       showToast(
         settings.turboMode
-          ? '⚡ 聆聽翻譯（Turbo）：1–2 句並行連翻成中文・防休眠'
-          : '📻 聆聽翻譯已開啟：每 2–3 句自動連翻成中文・省額度',
+          ? '⚡ 純中文全畫面聆聽（Turbo）：極速連翻＋自動回頭潤飾'
+          : '📻 純中文全畫面聆聽已開啟：連續翻譯並自動回頭潤飾語意',
         2800
       );
     } else {
@@ -1703,7 +2279,7 @@ async function toggleScenario(targetMode) {
 function enqueueVadSegment(wav) {
   upsertDraftCaptionDom('');
   const modeAtCapture = activeMode || 'dialogue';
-  recordTurboAutoEmit();
+  recordTurboAutoEmit(modeAtCapture);
   const profile = getAudioProfile(modeAtCapture, settings.turboMode, settings.silenceMs, turboThrottled);
 
   const job = {
@@ -1714,16 +2290,25 @@ function enqueueVadSegment(wav) {
     tone: settings.tone,
     contextLimit: profile.contextLimit,
     feedEpoch,
+    bcEpoch,
+    prevTailSegId: null,
+    hadPrevTail: false,
     done: false,
     utterances: null,
+    broadcastResult: null,
     error: null,
     latestStream: null,
   };
 
   vadPendingJobs.push(job);
   vadCommitQueue.push(job);
-  pendingCount += 1;
-  syncPendingPillDom();
+  if (modeAtCapture === 'broadcast') {
+    broadcastPendingCount += 1;
+    syncBroadcastPendingInline();
+  } else {
+    pendingCount += 1;
+    syncPendingPillDom();
+  }
   updateHeaderStatus();
   pumpVadPipeline();
 }
@@ -1732,7 +2317,8 @@ function pumpVadPipeline() {
   const maxConc = settings.turboMode && !turboThrottled ? 2 : 1;
   while (vadInFlight < maxConc && vadPendingJobs.length > 0) {
     const job = vadPendingJobs.shift();
-    if (job.feedEpoch !== feedEpoch) {
+    const isStale = job.mode === 'broadcast' ? job.bcEpoch !== bcEpoch : job.feedEpoch !== feedEpoch;
+    if (isStale) {
       job.done = true;
       drainVadCommits();
       continue;
@@ -1744,16 +2330,50 @@ function pumpVadPipeline() {
 
 async function runVadJob(job) {
   try {
-    const onStream = (chunk) => {
-      job.latestStream = chunk;
-      // Only paint live streaming card for the oldest uncommitted job so parallel Turbo jobs never flicker!
-      if (vadCommitQueue[0] === job && job.feedEpoch === feedEpoch) {
-        upsertDraftCaptionDom('');
-        upsertStreamingCardDom(chunk);
-      }
-    };
+    if (job.mode === 'broadcast') {
+      // Check if an earlier broadcast job is still in flight (Turbo parallel overlap)
+      const hasEarlierBcInFlight = vadCommitQueue.some(
+        (other) => other.seq < job.seq && other.mode === 'broadcast' && !other.done
+      );
+      const tail = !hasEarlierBcInFlight ? getBroadcastTailSegment() : null;
+      job.prevTailSegId = tail ? tail.seg.id : null;
+      job.hadPrevTail = !hasEarlierBcInFlight;
 
-    if (job.mode === 'dialogue') {
+      const priorContext = getBroadcastPriorContext(
+        job.prevTailSegId,
+        settings.turboMode ? 180 : 260
+      );
+
+      job.broadcastResult = await interpretBroadcastAudio({
+        apiKey: settings.apiKey,
+        model: settings.model,
+        wavBase64: job.wav.base64,
+        mimeType: job.wav.mimeType,
+        preferredLang: job.targetLang,
+        prevTailText: tail ? tail.seg.text : '',
+        priorContext,
+        onStream: ({ revisedPrev, currentZh }) => {
+          job.latestStream = { revisedPrev, currentZh };
+          if (vadCommitQueue[0] === job && job.bcEpoch === bcEpoch) {
+            if (currentZh) {
+              upsertBroadcastStreamSpan(currentZh);
+            } else if (revisedPrev && els.broadcastHint) {
+              els.broadcastHint.textContent = '✨ 正在依新語境回頭潤飾前句⋯';
+              els.broadcastHint.classList.add('revised-notice');
+            }
+          }
+        },
+      });
+    } else {
+      const onStream = (chunk) => {
+        job.latestStream = chunk;
+        // Only paint live streaming card for the oldest uncommitted job so parallel Turbo jobs never flicker!
+        if (vadCommitQueue[0] === job && job.feedEpoch === feedEpoch) {
+          upsertDraftCaptionDom('');
+          upsertStreamingCardDom(chunk);
+        }
+      };
+
       job.utterances = await interpretDialogueAudio({
         apiKey: settings.apiKey,
         model: settings.model,
@@ -1761,19 +2381,6 @@ async function runVadJob(job) {
         mimeType: job.wav.mimeType,
         targetLang: job.targetLang,
         tone: job.tone,
-        speakerMemory,
-        recentContext: messages.slice(-job.contextLimit),
-        contextLimit: job.contextLimit,
-        onStream,
-      });
-    } else {
-      job.utterances = await interpretListeningAudio({
-        apiKey: settings.apiKey,
-        model: settings.model,
-        wavBase64: job.wav.base64,
-        mimeType: job.wav.mimeType,
-        preferredLang: job.targetLang,
-        mode: 'broadcast',
         speakerMemory,
         recentContext: messages.slice(-job.contextLimit),
         contextLimit: job.contextLimit,
@@ -1791,15 +2398,34 @@ async function runVadJob(job) {
 }
 
 function drainVadCommits() {
-  let addedAny = false;
+  let addedDialogue = false;
+  let committedUnpolishedTurboBc = false;
 
   while (vadCommitQueue.length > 0 && vadCommitQueue[0].done) {
     const job = vadCommitQueue.shift();
-    if (pendingCount > 0) pendingCount -= 1;
 
-    if (job.feedEpoch !== feedEpoch) {
+    if (job.mode === 'broadcast') {
+      if (broadcastPendingCount > 0) broadcastPendingCount -= 1;
+      if (job.bcEpoch !== bcEpoch) continue;
+
+      clearBroadcastStreamSpan();
+      if (job.error) {
+        console.error('Broadcast interpret error:', job.error);
+        showToast(job.error.message || '聆聽翻譯失敗，請稍後再試', 3800);
+        continue;
+      }
+      if (job.broadcastResult) {
+        applyBroadcastCommit(job, job.broadcastResult);
+        if (!job.hadPrevTail) {
+          committedUnpolishedTurboBc = true;
+        }
+      }
       continue;
     }
+
+    // Dialogue job commit
+    if (pendingCount > 0) pendingCount -= 1;
+    if (job.feedEpoch !== feedEpoch) continue;
 
     clearStreamingCardDom();
 
@@ -1845,20 +2471,35 @@ function drainVadCommits() {
 
       messages.push(msg);
       appendMessageCard(msg);
-      addedAny = true;
+      addedDialogue = true;
     }
   }
 
-  if (addedAny) {
+  if (addedDialogue) {
     saveState();
   }
 
-  // If a second parallel Turbo job is already streaming tokens, hand off the live card smoothly
-  if (vadCommitQueue.length > 0 && vadCommitQueue[0].latestStream && vadCommitQueue[0].feedEpoch === feedEpoch) {
-    upsertStreamingCardDom(vadCommitQueue[0].latestStream);
+  // Hand off live streaming preview smoothly if a second parallel Turbo job already has partial output
+  const nextHead = vadCommitQueue[0];
+  if (nextHead && nextHead.latestStream) {
+    if (nextHead.mode === 'broadcast' && nextHead.bcEpoch === bcEpoch && nextHead.latestStream.currentZh) {
+      upsertBroadcastStreamSpan(nextHead.latestStream.currentZh);
+    } else if (nextHead.mode === 'dialogue' && nextHead.feedEpoch === feedEpoch) {
+      upsertStreamingCardDom(nextHead.latestStream);
+    }
+  }
+
+  // If a Turbo parallel broadcast burst just settled, automatically run one tiny text-only polish (~0.1x cost)
+  const hasMoreBroadcastPending = vadCommitQueue.some((j) => j.mode === 'broadcast');
+  if (committedUnpolishedTurboBc && !hasMoreBroadcastPending) {
+    const lastPara = broadcastParagraphs[broadcastParagraphs.length - 1];
+    if (lastPara && lastPara.segments.length >= 2 && lastPara.segments.some((s) => s.needsPolish)) {
+      polishBroadcastTail(false);
+    }
   }
 
   syncPendingPillDom();
+  syncBroadcastPendingInline();
   updateHeaderStatus();
 }
 
@@ -2301,7 +2942,7 @@ function saveSettingsFromForm() {
 
   if (!settings.draftCaption) {
     stopDraftRecognition(true);
-  } else if (activeMode && !isLiveActive) {
+  } else if (activeMode === 'dialogue' && !isLiveActive) {
     startDraftRecognition(settings.targetLang);
   }
 
@@ -2349,8 +2990,32 @@ function saveSettingsFromForm() {
   showToast('設定已儲存於本機');
 }
 
-// Export Transcript
+// Export Transcript (context-aware: exports continuous Chinese paragraphs in Broadcast view, or conversation log in Dialogue view)
 async function exportTranscript() {
+  if (viewMode === 'broadcast') {
+    const bcText = getBroadcastFullText();
+    if (!bcText) {
+      showToast('目前沒有可匯出的聆聽譯文');
+      return;
+    }
+    const content = `隨身口譯官 — 聆聽翻譯紀錄 (${new Date().toLocaleDateString('zh-TW')})\n\n${bcText}\n`;
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: '隨身口譯官聆聽譯文', text: content });
+        return;
+      } catch (_) {}
+    }
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `broadcast-zh-${new Date().toISOString().slice(0, 10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('已下載純中文譯文檔');
+    return;
+  }
+
   if (messages.length === 0) {
     showToast('目前沒有可匯出的對話紀錄');
     return;
@@ -2487,8 +3152,8 @@ audio.onVadStateChange = (speaking) => {
   if (activeMode === 'broadcast') {
     els.vadStatus.textContent =
       settings.turboMode && !turboThrottled
-        ? '⚡ Turbo 收聽中⋯滿 1–2 句並行快翻'
-        : '📻 收聽語音中⋯累積 2–3 句後自動翻譯';
+        ? '⚡ Turbo 收聽中⋯即時連翻純中文＋自動潤飾'
+        : '📻 收聽語音中⋯即將連翻純中文並潤飾前句';
   } else {
     els.vadStatus.textContent =
       settings.turboMode && !turboThrottled
@@ -2502,8 +3167,8 @@ audio.onCaptureProgress = (sec) => {
   if (activeMode === 'broadcast') {
     els.vadStatus.textContent =
       settings.turboMode && !turboThrottled
-        ? `⚡ Turbo 收聽中（${sec}s・滿 1–2 句並行快翻）`
-        : `📻 收聽中（已收 ${sec}s・滿 2–3 句自動翻）`;
+        ? `⚡ Turbo 收聽中（${sec}s・極速純中文）`
+        : `📻 純中文收聽中（已收 ${sec}s・自動連翻）`;
   } else if (sec >= 2) {
     els.vadStatus.textContent =
       settings.turboMode && !turboThrottled
@@ -2530,6 +3195,57 @@ if (els.broadcastSwitch) {
 }
 if (els.turboBtn) {
   els.turboBtn.addEventListener('click', toggleTurboMode);
+}
+
+// Broadcast Reader Toolbar & Paused Controls
+if (els.bcFontBtn) {
+  els.bcFontBtn.addEventListener('click', () => {
+    const idx = BC_FONT_ORDER.indexOf(settings.broadcastFontSize);
+    settings.broadcastFontSize = BC_FONT_ORDER[(idx + 1) % BC_FONT_ORDER.length];
+    haptic(8);
+    applyBroadcastFont();
+    saveState();
+  });
+}
+
+if (els.bcPolishBtn) {
+  els.bcPolishBtn.addEventListener('click', () => {
+    haptic(10);
+    polishBroadcastTail(true);
+  });
+}
+
+if (els.bcCopyBtn) {
+  els.bcCopyBtn.addEventListener('click', async () => {
+    const text = getBroadcastFullText();
+    if (!text) {
+      showToast('目前沒有可複製的中文內容');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      haptic(10);
+      showToast('已複製整篇中文譯文');
+    } catch (_) {
+      showToast('複製失敗');
+    }
+  });
+}
+
+if (els.bcDemoBtn) {
+  els.bcDemoBtn.addEventListener('click', runBroadcastDemo);
+}
+
+if (els.bcResumeBtn) {
+  els.bcResumeBtn.addEventListener('click', () => toggleScenario('broadcast'));
+}
+
+if (els.bcBackToChatBtn) {
+  els.bcBackToChatBtn.addEventListener('click', () => {
+    viewMode = 'dialogue';
+    haptic(8);
+    updateSwitchUI();
+  });
 }
 
 if (els.toneQuickBtn) {
@@ -2564,7 +3280,9 @@ els.langBar.addEventListener('click', (e) => {
       if (!audio.isSpeaking) {
         els.vadStatus.textContent = getIdleVadHint();
       }
-      startDraftRecognition(settings.targetLang);
+      if (activeMode === 'dialogue') {
+        startDraftRecognition(settings.targetLang);
+      }
     }
   }
 });
@@ -2657,6 +3375,18 @@ els.themeBtn.addEventListener('click', () => {
 els.exportBtn.addEventListener('click', exportTranscript);
 
 els.clearBtn.addEventListener('click', () => {
+  if (viewMode === 'broadcast') {
+    if (broadcastParagraphs.length === 0) return;
+    if (!window.confirm('確定要清除目前所有聆聽翻譯的中文內容嗎？')) return;
+    clearTimeout(bcDemoTimer);
+    bcEpoch += 1;
+    clearBroadcastStreamSpan();
+    broadcastParagraphs = [];
+    saveState();
+    renderBroadcastCanvas(true);
+    showToast('已清除聆聽譯文');
+    return;
+  }
   if (messages.length === 0) return;
   if (!window.confirm('確定要清除目前所有對話紀錄與說話者記憶嗎？')) return;
   feedEpoch += 1;
@@ -2773,3 +3503,4 @@ applyActiveAudioProfile();
 applyTheme();
 updateSwitchUI();
 renderFeed();
+renderBroadcastCanvas(true);
