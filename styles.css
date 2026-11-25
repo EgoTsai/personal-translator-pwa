@@ -129,7 +129,7 @@ button {
 
 /* Header */
 .top-header {
-  padding: calc(10px + var(--safe-top)) 16px 10px;
+  padding: calc(10px + var(--safe-top)) 12px 10px;
   background: var(--bg-app);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -140,24 +140,24 @@ button {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 6px;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
 .brand-mark {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
   background: var(--accent);
   color: var(--accent-ink);
   font-weight: 700;
-  font-size: 16px;
+  font-size: 15px;
   display: grid;
   place-items: center;
   flex-shrink: 0;
@@ -172,12 +172,12 @@ button {
 .brand-title-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
 }
 
 .brand-title {
   margin: 0;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
   letter-spacing: -0.01em;
   line-height: 1.2;
@@ -185,10 +185,10 @@ button {
 
 .version-badge {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 600;
   line-height: 1;
-  padding: 3px 6px;
+  padding: 2.5px 5px;
   border-radius: 6px;
   background: var(--bg-subtle);
   color: var(--ink-muted);
@@ -204,10 +204,17 @@ button {
 .status-line {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: 5px;
+  font-size: 11.5px;
   color: var(--ink-muted);
   margin-top: 1px;
+  min-width: 0;
+}
+
+.status-line #statusText {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .status-dot {
@@ -215,10 +222,15 @@ button {
   height: 7px;
   border-radius: 50%;
   background: var(--ink-muted);
+  flex-shrink: 0;
   transition: background 0.2s ease;
 }
 
 .status-dot.ready { background: var(--accent); }
+.status-dot.dialogue {
+  background: var(--accent);
+  animation: pulseDot 1.35s ease-in-out infinite;
+}
 .status-dot.listening {
   background: var(--live);
   animation: pulseDot 1.4s ease-in-out infinite;
@@ -240,14 +252,54 @@ button {
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.turbo-btn {
+  height: 29px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink-secondary);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  white-space: nowrap;
+  transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, transform 0.1s ease;
+}
+
+.turbo-btn.on {
+  background: linear-gradient(135deg, #F59E0B, #EA580C);
+  color: #FFFFFF;
+  border-color: transparent;
+  box-shadow: 0 2px 8px rgba(234, 88, 12, 0.34);
+}
+
+[data-theme="dark"] .turbo-btn.on {
+  background: linear-gradient(135deg, #FBBF24, #F97316);
+  color: #1A1205;
+  box-shadow: 0 2px 10px rgba(251, 191, 36, 0.3);
+}
+
+.turbo-btn.on.throttled {
+  background: linear-gradient(135deg, #D97706, #B45309);
+  opacity: 0.92;
+}
+
+.turbo-btn:active {
+  transform: scale(0.94);
 }
 
 .tone-chip {
-  height: 30px;
-  padding: 0 10px;
+  height: 29px;
+  padding: 0 8px;
   border-radius: 999px;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 700;
   color: var(--ink-secondary);
   background: var(--bg-subtle);
@@ -267,9 +319,9 @@ button {
 }
 
 .icon-btn {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
   display: grid;
   place-items: center;
   color: var(--ink-secondary);
@@ -283,14 +335,52 @@ button {
 }
 
 .icon-btn svg {
-  width: 19px;
-  height: 19px;
+  width: 18px;
+  height: 18px;
   stroke-width: 1.9;
+}
+
+@media (max-width: 380px) {
+  .top-header {
+    padding: calc(9px + var(--safe-top)) 10px 9px;
+  }
+  .brand {
+    gap: 6px;
+  }
+  .brand-mark {
+    width: 28px;
+    height: 28px;
+    font-size: 13.5px;
+    border-radius: 8px;
+  }
+  .brand-title {
+    font-size: 14px;
+  }
+  .version-badge {
+    font-size: 9.5px;
+    padding: 2px 4px;
+  }
+  .header-actions {
+    gap: 3px;
+  }
+  .turbo-btn, .tone-chip {
+    height: 27px;
+    padding: 0 7px;
+    font-size: 11px;
+  }
+  .icon-btn {
+    width: 30px;
+    height: 30px;
+  }
+  .icon-btn svg {
+    width: 17px;
+    height: 17px;
+  }
 }
 
 /* Language Segmented Bar */
 .lang-bar {
-  margin-top: 10px;
+  margin-top: 9px;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 6px;
@@ -323,11 +413,11 @@ button {
   box-shadow: var(--shadow-sm);
 }
 
-/* Dual Clean Switch Deck (Listening + Live Streaming Mode) */
+/* Dual Scenario Deck (對話 + 聆聽翻譯) */
 .switch-deck {
-  padding: 8px 14px;
+  padding: 8px 12px;
   display: grid;
-  grid-template-columns: 1.15fr 1fr;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
   background: var(--bg-app);
   border-bottom: 1px solid var(--border);
@@ -370,9 +460,19 @@ button {
   }
 }
 
+.switch-card.dialogue-on {
+  background: var(--accent-soft);
+  border-color: rgba(14, 90, 90, 0.34);
+}
+
+[data-theme="dark"] .switch-card.dialogue-on {
+  border-color: rgba(60, 169, 160, 0.42);
+}
+
+.switch-card.broadcast-on,
 .switch-card.listen-on {
   background: var(--live-soft);
-  border-color: rgba(200, 75, 49, 0.32);
+  border-color: rgba(200, 75, 49, 0.34);
 }
 
 .switch-card.live-on {
@@ -411,6 +511,12 @@ button {
   text-overflow: ellipsis;
 }
 
+.switch-card.dialogue-on .switch-sub {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.switch-card.broadcast-on .switch-sub,
 .switch-card.listen-on .switch-sub {
   color: var(--live);
   font-weight: 600;
@@ -453,6 +559,11 @@ button {
   transition: transform 0.2s cubic-bezier(0.34, 1.4, 0.64, 1);
 }
 
+.switch-card.dialogue-on .toggle-track {
+  background: var(--accent);
+}
+
+.switch-card.broadcast-on .toggle-track,
 .switch-card.listen-on .toggle-track {
   background: var(--live);
 }
@@ -469,6 +580,8 @@ button {
   background: var(--accent);
 }
 
+.switch-card.dialogue-on .toggle-thumb,
+.switch-card.broadcast-on .toggle-thumb,
 .switch-card.listen-on .toggle-thumb,
 .switch-card.live-on .toggle-thumb,
 .switch-card.tts-on .toggle-thumb {
@@ -491,6 +604,18 @@ button {
 
 .listen-strip.visible {
   display: flex;
+}
+
+.listen-strip.dialogue-mode {
+  background: var(--accent-soft);
+  border-bottom-color: rgba(14, 90, 90, 0.2);
+  color: var(--accent);
+}
+
+.listen-strip.broadcast-mode {
+  background: var(--live-soft);
+  border-bottom-color: rgba(200, 75, 49, 0.2);
+  color: var(--live);
 }
 
 .listen-strip.live-mode {

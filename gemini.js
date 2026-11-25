@@ -333,10 +333,284 @@ async function rescueTranslateToZhTW({ apiKey, model, text, sourceLang, signal }
   return extractTextPart(data);
 }
 
+async function generateJsonWithStreamingFallback({
+  apiKey,
+  model,
+  payload,
+  onPartialText = null,
+  signal = null,
+  timeoutMs = 24000,
+}) {
+  if (typeof onPartialText === 'function') {
+    try {
+      const streamed = await postStreamGenerateContent(apiKey, model, payload, onPartialText, signal, timeoutMs);
+      if (streamed) return streamed;
+    } catch (err) {
+      if (err?.name === 'AbortError' || signal?.aborted) throw err;
+      // Do not retry auth/quota errors (400 invalid key, 401, 403, 404, 429)
+      if (/\((400|401|403|404|429)\)|API Key 無效|配額/.test(err?.message || '')) {
+        throw err;
+      }
+      console.warn('SSE stream failed, falling back to unary generateContent:', err?.message || err);
+    }
+  }
+  const data = await postGenerateContent(apiKey, model, payload, signal, timeoutMs);
+  return extractTextPart(data);
+}
+
 /**
- * Mode 1: Continuous Listening Interpreter
- * - Non-Chinese speech -> translate into natural Traditional Chinese (zh-TW) + keep original text
- * - Chinese speech -> transcribe directly into Traditional Chinese (no translation)
+ * Scenario 1: Bidirectional Auto-Dialogue Interpreter ("對話" 模式)
+ * - Non-Chinese speech (EN/JA/SV/etc.) -> inbound card translated to natural zh-TW + speaker diarization (A/B/C/D)
+ * - Chinese speech -> outbound card translated to selected targetLang (EN/JA/SV) with tone + Kana/stress reading
+ */
+export async function interpretDialogueAudio({
+  apiKey,
+  model,
+  wavBase64,
+  mimeType = 'audio/wav',
+  targetLang = 'en',
+  tone = 'natural',
+  speakerMemory = {},
+  recentContext = [],
+  contextLimit = 4,
+  onStream = null,
+  signal,
+}) {
+  const langInfo = TARGET_LANGUAGES[targetLang] || TARGET_LANGUAGES.en;
+  const toneDesc = TONE_PRESETS[tone] || TONE_PRESETS.natural;
+
+  const speakerLines = Object.entries(speakerMemory)
+    .slice(0, 6)
+    .map(([id, info]) => `- ${id}${info.customName ? `（${info.customName}）` : ''}：${info.voiceHint || '說話者'}`)
+    .join('\n');
+
+  const limit = Math.max(0, Number(contextLimit) || 4);
+  const contextLines =
+    limit > 0
+      ? recentContext
+          .slice(-limit)
+          .map((m) => {
+            if (m.direction === 'outbound') {
+              return `我: ${m.zh} -> ${m.translated}`;
+            }
+            return `${m.speaker}: ${m.zh}${m.original && !m.isChinese ? ` (${m.original})` : ''}`;
+          })
+          .join('\n')
+      : '';
+
+  const systemInstruction = `你是使用者的即時雙向口譯官（自動對話模式）。使用者母語為繁體中文（台灣用語），對話對象使用「${langInfo.label}（${langInfo.nativeName}）」或其他外語。
+
+請嚴格遵守以下雙向翻譯規則：
+1. **自動雙向判斷（最重要！）**：
+   - 聽到**非中文**（英語、日語、瑞典語或任何其他外語）：
+     - \`direction\` 設為 \`"inbound"\`
+     - \`speaker\` 依聲紋與問答輪替標註 \`A\`、\`B\`、\`C\`、\`D\`（不同聲音或回應方請給不同代號）
+     - \`source_lang\` 填入 ISO 639-1 語言碼（如 \`en\`、\`ja\`、\`sv\`），\`target_lang\` 設為 \`"zh"\`
+     - \`original_text\` 填外語正確逐字稿；\`translated_text\` **必須翻譯成自然流暢的繁體中文（台灣慣用語）**，不可留外語！
+     - \`reading\` 留空字串 \`""\`。
+   - 聽到**中文**（國語／台灣華語／普通話）：
+     - \`direction\` 設為 \`"outbound"\`
+     - \`speaker\` 固定為 \`"我"\`
+     - \`source_lang\` 設為 \`"zh"\`，\`target_lang\` 設為 \`"${langInfo.code}"\`
+     - \`original_text\` 填繁體中文原話；\`translated_text\` 翻譯成自然道地的「${langInfo.label}（${langInfo.nativeName}）」，語氣：${toneDesc}。
+     - \`reading\`：僅當目標語為日語（\`ja\`）時提供假名與羅馬拼音；瑞典語（\`sv\`）必要時提供簡短重音提示；其餘留空字串 \`""\`。
+2. 若同段音訊有多人輪流說話，請依時間順序拆分為多筆 \`utterances\`。
+3. 若只有背景雜音、空白、咳嗽或無有效語音，回傳 \`{"utterances": []}\`，勿捏造內容。
+4. 只輸出符合 schema 的 JSON。`;
+
+  const promptText = [
+    speakerLines ? `【已知說話者】\n${speakerLines}` : '',
+    contextLines ? `【近期上下文】\n${contextLines}` : '',
+    `分析音訊並雙向口譯：外語→繁體中文；中文→${langInfo.label}。`,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  const payload = {
+    systemInstruction: {
+      parts: [{ text: systemInstruction }],
+    },
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          {
+            inlineData: {
+              mimeType,
+              data: wavBase64,
+            },
+          },
+          { text: promptText },
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.15,
+      ...buildThinkingConfig(model),
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'OBJECT',
+        properties: {
+          utterances: {
+            type: 'ARRAY',
+            items: {
+              type: 'OBJECT',
+              properties: {
+                direction: {
+                  type: 'STRING',
+                  description: '外語翻中文為 inbound；中文翻外語為 outbound',
+                },
+                speaker: {
+                  type: 'STRING',
+                  description: 'inbound 填 A/B/C/D；outbound 固定填 我',
+                },
+                voice_hint: {
+                  type: 'STRING',
+                  description: 'inbound 簡述音色語言（如 男聲・英語）；outbound 留空',
+                },
+                source_lang: {
+                  type: 'STRING',
+                  description: '原話 ISO 639-1 語言碼，如 en, ja, sv, zh',
+                },
+                target_lang: {
+                  type: 'STRING',
+                  description: `譯文語言碼：inbound 為 zh，outbound 為 ${langInfo.code}`,
+                },
+                original_text: {
+                  type: 'STRING',
+                  description: '原話精準逐字稿',
+                },
+                translated_text: {
+                  type: 'STRING',
+                  description: '自然道地譯文（inbound 必為繁體中文；outbound 必為目標外語）',
+                },
+                reading: {
+                  type: 'STRING',
+                  description: '日語假名/羅馬音或瑞典語簡短重音提示；其餘留空',
+                },
+              },
+              required: [
+                'direction',
+                'speaker',
+                'voice_hint',
+                'source_lang',
+                'target_lang',
+                'original_text',
+                'translated_text',
+                'reading',
+              ],
+            },
+          },
+        },
+        required: ['utterances'],
+      },
+    },
+  };
+
+  const raw = await generateJsonWithStreamingFallback({
+    apiKey,
+    model,
+    payload,
+    onPartialText:
+      typeof onStream === 'function'
+        ? (partial) => {
+            const dir = (extractPartialJsonStringField(partial, 'direction') || '').toLowerCase();
+            const srcLang = (extractPartialJsonStringField(partial, 'source_lang') || '').toLowerCase();
+            const original = extractPartialJsonStringField(partial, 'original_text');
+            const translated = extractPartialJsonStringField(partial, 'translated_text');
+            const reading = extractPartialJsonStringField(partial, 'reading');
+            const speaker = extractPartialJsonStringField(partial, 'speaker');
+            if (translated || original) {
+              const isOut = dir === 'outbound' || srcLang.startsWith('zh');
+              onStream({
+                direction: isOut ? 'outbound' : 'inbound',
+                speaker: isOut ? '我' : (speaker || 'A').toUpperCase().slice(0, 4),
+                lang: isOut ? langInfo.code : (srcLang || langInfo.code),
+                mainText: translated || original,
+                subText:
+                  translated && original && translated !== original
+                    ? isOut
+                      ? `原話：${original}`
+                      : original
+                    : '',
+                reading: isOut ? reading : '',
+              });
+            }
+          }
+        : null,
+    signal,
+  });
+
+  const parsed = safeJsonParse(raw);
+  const list = Array.isArray(parsed?.utterances) ? parsed.utterances : [];
+
+  const normalized = [];
+  for (const u of list) {
+    if (!u) continue;
+    let original = String(u.original_text || u.original || '').trim();
+    let translated = String(u.translated_text || u.translated || u.chinese_translation || '').trim();
+    if (!original && !translated) continue;
+
+    const sourceLang = String(u.source_lang || u.lang || 'unknown').trim().toLowerCase().slice(0, 8);
+    const dirRaw = String(u.direction || '').trim().toLowerCase();
+    const isOutbound = dirRaw === 'outbound' || (dirRaw !== 'inbound' && sourceLang.startsWith('zh'));
+
+    if (isOutbound) {
+      normalized.push({
+        direction: 'outbound',
+        speaker: '我',
+        voiceHint: '',
+        sourceLang: 'zh',
+        targetLang: langInfo.code,
+        isChinese: true,
+        original: original || translated,
+        zh: original || translated,
+        translated: translated || original,
+        reading: String(u.reading || '').trim(),
+      });
+    } else {
+      const lang = sourceLang.startsWith('zh') ? langInfo.code : sourceLang;
+      if (looksUntranslatedForZh(translated, original, lang)) {
+        const sourceForRescue =
+          /[\u3040-\u30ff]/.test(translated) && (!original || original.length <= translated.length)
+            ? translated
+            : original || translated;
+        original = sourceForRescue;
+        try {
+          const rescued = await rescueTranslateToZhTW({
+            apiKey,
+            model,
+            text: sourceForRescue,
+            sourceLang: lang,
+            signal,
+          });
+          if (rescued) translated = rescued.trim();
+        } catch (_) {}
+      }
+
+      const spCode = String(u.speaker || 'A').trim().toUpperCase().replace(/[^A-Z]/g, '').slice(0, 1) || 'A';
+      normalized.push({
+        direction: 'inbound',
+        speaker: spCode,
+        voiceHint: String(u.voice_hint || '').trim(),
+        sourceLang: lang,
+        targetLang: 'zh',
+        isChinese: false,
+        original: original || translated,
+        zh: translated || original,
+        translated: translated || original,
+        reading: '',
+      });
+    }
+  }
+
+  return normalized;
+}
+
+/**
+ * Scenario 2: Continuous Listening / Broadcast Interpreter ("聆聽翻譯" 模式 — 新聞・演講・Podcast)
+ * - Non-Chinese speech (typically 2–3 sentences per batch) -> coherent Traditional Chinese (zh-TW) paragraph + original text
+ * - Chinese speech -> transcribe verbatim into Traditional Chinese
  * - Tag speakers consistently (A, B, C, ...)
  */
 export async function interpretListeningAudio({
@@ -345,59 +619,65 @@ export async function interpretListeningAudio({
   wavBase64,
   mimeType = 'audio/wav',
   preferredLang = 'en',
+  mode = 'broadcast',
   speakerMemory = {},
   recentContext = [],
+  contextLimit = 4,
   onStream = null,
   signal,
 }) {
   const langInfo = TARGET_LANGUAGES[preferredLang] || TARGET_LANGUAGES.en;
+  const isBroadcast = mode === 'broadcast';
 
   const speakerLines = Object.entries(speakerMemory)
-    .map(([id, info]) => `- ${id}${info.customName ? `（別名：${info.customName}）` : ''}：${info.voiceHint || '已出現說話者'}`)
+    .slice(0, 6)
+    .map(([id, info]) => `- ${id}${info.customName ? `（${info.customName}）` : ''}：${info.voiceHint || '說話者'}`)
     .join('\n');
 
-  const contextLines = recentContext
-    .slice(-6)
-    .map((m) => `${m.speaker}: ${m.zh}${m.original && !m.isChinese ? ` (${m.original})` : ''}`)
-    .join('\n');
+  const limit = Math.max(0, Number(contextLimit) || 4);
+  const contextLines =
+    limit > 0
+      ? recentContext
+          .slice(-limit)
+          .map((m) => `${m.speaker}: ${m.zh}${m.original && !m.isChinese ? ` (${m.original})` : ''}`)
+          .join('\n')
+      : '';
 
-  const systemInstruction = `你是一位專業、精準、反應迅速的個人隨身即時口譯官。使用者以繁體中文（台灣用語）為母語，目前對話對象可能使用英語、日語、瑞典語、中文或其他語言（目前重點關注語言：${langInfo.label} / ${langInfo.nativeName}）。
+  const broadcastRule = isBroadcast
+    ? `
+0. **新聞／演講連貫段落模式（2–3 句整合翻譯）**：
+   - 這段音訊是連續收聽的新聞、Podcast、影片或演講片段（通常包含 2–3 句話）。
+   - 若為**同一位講者**連續說的數句話，請將它們合併為**同一筆連貫流暢的繁體中文段落**（不要拆成零碎短句），並完整保留所有重點資訊與專有名詞一致性。
+   - 若片段開頭因無縫收音與【最近紀錄】的最後 1–2 個字重疊，請自然銜接、不要重複翻譯前文已翻過的部分。
+   - 僅當同一段音訊中明顯切換不同說話者（例如主播與受訪者）時，才拆分為多筆 \`utterances\`。`
+    : '';
 
-請仔細聆聽音訊並嚴格遵守以下規則：
+  const systemInstruction = `你是一位專業、精準、反應迅速的個人隨身即時口譯官。使用者以繁體中文（台灣用語）為母語，目前收聽的內容可能是英語、日語、瑞典語、中文或其他語言（重點語言：${langInfo.label} / ${langInfo.nativeName}）。
+
+請仔細聆聽音訊並嚴格遵守以下規則：${broadcastRule}
 
 1. **說話者區分（Speaker Diarization）**：
    - 為每位說話者標註一致的單一大寫英文字母代號：\`A\`、\`B\`、\`C\`、\`D\`...
-   - **務必仔細比對聲音特徵（性別、音高、音色、語速、口音、語言）以及對話輪替語境**：
-     - 如果這句話的聲音與先前說話者不同，或**明顯是對前一位說話者的回應／回答**（例如 A 問「你聽得到我嗎？」，接著有人回答「我聽得到你」），請給予**不同的說話者代號**（例如改標 \`B\`），不要把所有人都全部標成 \`A\`！
-     - 若聲音與語境明確屬於先前已知的同一位說話者，則沿用原本的代號。
-   - 若同一段音訊中有多人輪流說話，請依時間順序拆分為多筆 \`utterances\`。
+   - 比對聲音特徵（性別、音色、口音、語言）：不同聲音請給不同代號，同一位講者沿用原代號。
 
 2. **語言判斷與翻譯規則（極重要！）**：
    - **聽到「非中文」**（英語、日語、瑞典語或任何其他外語）：
-     - \`is_chinese\` 設為 \`false\`
-     - \`lang\` 填入 ISO 639-1 語言代碼（如 \`en\`、\`ja\`、\`sv\`）
-     - \`original_text\` 填入該外語正確自然的逐字原文（日文請用正常漢字與假名拼寫）
-     - \`chinese_translation\` **必須完整翻譯成自然流暢的繁體中文（台灣慣用語）**！**絕對不可**直接複製日文假名、英文或瑞典文到 \`chinese_translation\` 欄位！
-   - **聽到「中文」**（國語／普通話／台灣華語等）：
-     - \`is_chinese\` 設為 \`true\`
-     - \`lang\` 設為 \`zh\`
-     - \`original_text\` 與 \`chinese_translation\` 都直接填入精準的繁體中文原話，不要改寫也不要翻譯。
+     - \`is_chinese\` 設為 \`false\`，\`lang\` 填 ISO 639-1 語言碼（如 \`en\`、\`ja\`、\`sv\`）
+     - \`original_text\` 填該外語完整正確逐字稿
+     - \`chinese_translation\` **必須完整翻譯成自然流暢的繁體中文（台灣慣用語）**！絕對不可直接留外語或日文假名！
+   - **聽到「中文」**：
+     - \`is_chinese\` 設為 \`true\`，\`lang\` 設為 \`zh\`，\`original_text\` 與 \`chinese_translation\` 都填精準繁體中文原話。
 
-3. **正確輸出範例**：
-   - 聽到日文「いただきます」→ \`{"speaker":"A","voice_hint":"男聲・日語","lang":"ja","is_chinese":false,"original_text":"いただきます","chinese_translation":"我要開動了"}\`
-   - 聽到英文 "Can you hear me?" 後接著另一人答 "Yes, I can hear you." → 第一句 \`speaker:"A"\`、\`chinese_translation:"你聽得到我嗎？"\`；第二句 \`speaker:"B"\`、\`chinese_translation:"對，我聽得到你。"\`
-   - 聽到中文「我很好，謝謝」→ \`{"speaker":"B","voice_hint":"女聲・中文","lang":"zh","is_chinese":true,"original_text":"我很好，謝謝","chinese_translation":"我很好，謝謝"}\`
-
-4. **過濾雜訊**：
-   - 若音訊只有背景雜音、空白、呼吸聲、咳嗽或無法辨識的片段，直接回傳 \`{"utterances": []}\`，絕對不要捏造內容。
-5. 只輸出符合 schema 的 JSON。`;
+3. **過濾雜訊**：
+   - 若只有背景音樂、純雜訊、空白或無法辨識的氣音，回傳 \`{"utterances": []}\`，勿捏造內容。
+4. 只輸出符合 schema 的 JSON。`;
 
   const promptText = [
-    speakerLines
-      ? `【先前已記錄的說話者特徵】\n${speakerLines}\n（請比對音色、語言與問答輪替：若為不同聲音或對話回應方，請使用下一個代號如 B / C）`
-      : '【目前尚無先前說話者記錄：第一位開口者標記為 A，第二位不同聲音或回應方標記為 B】',
-    contextLines ? `【最近對話紀錄（供問答輪替與語境參考）】\n${contextLines}` : '',
-    '請分析這段新收錄的音訊，並嚴格確保外語的 chinese_translation 欄位一定是繁體中文翻譯，輸出 JSON。',
+    speakerLines ? `【已知講者】\n${speakerLines}` : '',
+    contextLines ? `【前文脈絡（保持專有名詞一致，若開頭重疊勿重複翻）】\n${contextLines}` : '',
+    isBroadcast
+      ? '請將這段連續收聽的語音（約 2–3 句）完整、連貫地翻譯成自然流暢的繁體中文段落，輸出 JSON。'
+      : '請分析這段新收錄的音訊，確保外語的 chinese_translation 必為繁體中文翻譯，輸出 JSON。',
   ]
     .filter(Boolean)
     .join('\n\n');
@@ -438,7 +718,7 @@ export async function interpretListeningAudio({
                 },
                 voice_hint: {
                   type: 'STRING',
-                  description: '聲音特徵（性別・音高・語言），例如：男聲・低沉・英語',
+                  description: '聲音特徵（性別・語言），例如：男主播・英語',
                 },
                 lang: {
                   type: 'STRING',
@@ -450,11 +730,11 @@ export async function interpretListeningAudio({
                 },
                 original_text: {
                   type: 'STRING',
-                  description: '原話正確逐字稿（保留原語言，如日文／英文／瑞典文／中文）',
+                  description: '原話完整逐字稿（保留原語言）',
                 },
                 chinese_translation: {
                   type: 'STRING',
-                  description: '必須為繁體中文！非中文時務必翻譯成自然繁體中文，不可留外語；中文時照原話輸出',
+                  description: '必須為自然連貫的繁體中文翻譯！不可留外語；中文時照原話輸出',
                 },
               },
               required: ['speaker', 'voice_hint', 'lang', 'is_chinese', 'original_text', 'chinese_translation'],
@@ -466,33 +746,30 @@ export async function interpretListeningAudio({
     },
   };
 
-  let raw = '';
-  if (typeof onStream === 'function') {
-    raw = await postStreamGenerateContent(
-      apiKey,
-      model,
-      payload,
-      (partial) => {
-        const zh = extractPartialJsonStringField(partial, 'chinese_translation');
-        const original = extractPartialJsonStringField(partial, 'original_text');
-        const speaker = extractPartialJsonStringField(partial, 'speaker') || 'A';
-        const lang = extractPartialJsonStringField(partial, 'lang') || '';
-        if (zh || original) {
-          onStream({
-            direction: 'inbound',
-            speaker: speaker.toUpperCase().slice(0, 4) || 'A',
-            lang: lang.toLowerCase().slice(0, 8),
-            mainText: zh || original,
-            subText: zh && original && original !== zh ? original : '',
-          });
-        }
-      },
-      signal
-    );
-  } else {
-    const data = await postGenerateContent(apiKey, model, payload, signal);
-    raw = extractTextPart(data);
-  }
+  const raw = await generateJsonWithStreamingFallback({
+    apiKey,
+    model,
+    payload,
+    onPartialText:
+      typeof onStream === 'function'
+        ? (partial) => {
+            const zh = extractPartialJsonStringField(partial, 'chinese_translation');
+            const original = extractPartialJsonStringField(partial, 'original_text');
+            const speaker = extractPartialJsonStringField(partial, 'speaker') || 'A';
+            const lang = extractPartialJsonStringField(partial, 'lang') || '';
+            if (zh || original) {
+              onStream({
+                direction: 'inbound',
+                speaker: speaker.toUpperCase().slice(0, 4) || 'A',
+                lang: lang.toLowerCase().slice(0, 8),
+                mainText: zh || original,
+                subText: zh && original && original !== zh ? original : '',
+              });
+            }
+          }
+        : null,
+    signal,
+  });
 
   const parsed = safeJsonParse(raw);
   const list = Array.isArray(parsed?.utterances) ? parsed.utterances : [];
@@ -508,9 +785,8 @@ export async function interpretListeningAudio({
     const isChinese = Boolean(u.is_chinese) || lang.startsWith('zh');
 
     if (!isChinese && looksUntranslatedForZh(zh, original, lang)) {
-      // If the cleaner foreign phrase accidentally landed in `zh`, keep the better original & rescue translate to zh-TW
       const sourceForRescue =
-        /[\u3040-\u30ff]/.test(zh) && (!original || original.length <= zh.length) ? zh : (original || zh);
+        /[\u3040-\u30ff]/.test(zh) && (!original || original.length <= zh.length) ? zh : original || zh;
       original = sourceForRescue;
       try {
         const rescued = await rescueTranslateToZhTW({
@@ -525,7 +801,8 @@ export async function interpretListeningAudio({
     }
 
     normalized.push({
-      speaker: String(u.speaker || 'A').trim().toUpperCase().slice(0, 4) || 'A',
+      direction: 'inbound',
+      speaker: String(u.speaker || 'A').trim().toUpperCase().replace(/[^A-Z]/g, '').slice(0, 1) || 'A',
       voiceHint: String(u.voice_hint || '').trim(),
       lang,
       isChinese,
@@ -538,8 +815,7 @@ export async function interpretListeningAudio({
 }
 
 /**
- * Mode 2: Outbound Translation — User speaks (audio) or types (text) Chinese,
- * translate into natural English / Japanese / Swedish to speak to the other person.
+ * Manual Voice / Text Quick Translation — Auto-detects Chinese <-> English / Japanese / Swedish.
  */
 export async function translateOutboundChinese({
   apiKey,
@@ -550,16 +826,21 @@ export async function translateOutboundChinese({
   mimeType = 'audio/wav',
   textInput = null,
   recentContext = [],
+  contextLimit = 5,
   onStream = null,
   signal,
 }) {
   const langInfo = TARGET_LANGUAGES[targetLang] || TARGET_LANGUAGES.en;
   const toneDesc = TONE_PRESETS[tone] || TONE_PRESETS.natural;
 
-  const contextLines = recentContext
-    .slice(-6)
-    .map((m) => `${m.speaker}: ${m.zh}${m.original && !m.isChinese ? ` (${m.original})` : ''}`)
-    .join('\n');
+  const limit = Math.max(0, Number(contextLimit) || 5);
+  const contextLines =
+    limit > 0
+      ? recentContext
+          .slice(-limit)
+          .map((m) => `${m.speaker}: ${m.zh}${m.original && !m.isChinese ? ` (${m.original})` : ''}`)
+          .join('\n')
+      : '';
 
   const systemInstruction = `你是使用者的專屬隨身雙向口譯官。請自動偵測使用者輸入（文字或語音）的語言，並遵守以下雙向翻譯規則：
 
@@ -637,35 +918,37 @@ export async function translateOutboundChinese({
     },
   };
 
-  let raw = '';
-  if (typeof onStream === 'function') {
-    raw = await postStreamGenerateContent(
-      apiKey,
-      model,
-      payload,
-      (partial) => {
-        const srcLang = (extractPartialJsonStringField(partial, 'source_lang') || '').toLowerCase();
-        const srcText = extractPartialJsonStringField(partial, 'source_text') || textInput || '';
-        const translated = extractPartialJsonStringField(partial, 'translated');
-        const reading = extractPartialJsonStringField(partial, 'reading');
-        if (translated || srcText) {
-          const isSrcZh = srcLang ? srcLang.startsWith('zh') : /[\u4e00-\u9fff]/.test(srcText);
-          onStream({
-            direction: isSrcZh ? 'outbound' : 'inbound',
-            speaker: isSrcZh ? '我' : '譯',
-            lang: isSrcZh ? langInfo.code : (srcLang || langInfo.code),
-            mainText: translated || srcText,
-            subText: translated && srcText && translated !== srcText ? (isSrcZh ? `原話：${srcText}` : srcText) : '',
-            reading: isSrcZh ? reading : '',
-          });
-        }
-      },
-      signal
-    );
-  } else {
-    const data = await postGenerateContent(apiKey, model, payload, signal);
-    raw = extractTextPart(data);
-  }
+  const raw = await generateJsonWithStreamingFallback({
+    apiKey,
+    model,
+    payload,
+    onPartialText:
+      typeof onStream === 'function'
+        ? (partial) => {
+            const srcLang = (extractPartialJsonStringField(partial, 'source_lang') || '').toLowerCase();
+            const srcText = extractPartialJsonStringField(partial, 'source_text') || textInput || '';
+            const translated = extractPartialJsonStringField(partial, 'translated');
+            const reading = extractPartialJsonStringField(partial, 'reading');
+            if (translated || srcText) {
+              const isSrcZh = srcLang ? srcLang.startsWith('zh') : /[\u4e00-\u9fff]/.test(srcText);
+              onStream({
+                direction: isSrcZh ? 'outbound' : 'inbound',
+                speaker: isSrcZh ? '我' : '譯',
+                lang: isSrcZh ? langInfo.code : srcLang || langInfo.code,
+                mainText: translated || srcText,
+                subText:
+                  translated && srcText && translated !== srcText
+                    ? isSrcZh
+                      ? `原話：${srcText}`
+                      : srcText
+                    : '',
+                reading: isSrcZh ? reading : '',
+              });
+            }
+          }
+        : null,
+    signal,
+  });
 
   const parsed = safeJsonParse(raw);
 
@@ -677,7 +960,21 @@ export async function translateOutboundChinese({
   const isSourceChinese = sourceLang.startsWith('zh');
   const resolvedTargetLang = isSourceChinese ? langInfo.code : 'zh';
   const sourceText = String(parsed.source_text || textInput || '').trim();
-  const translated = String(parsed.translated || '').trim();
+  let translated = String(parsed.translated || '').trim();
+
+  // Safety rescue if non-Chinese input leaked untranslated text into Chinese output
+  if (!isSourceChinese && looksUntranslatedForZh(translated, sourceText, sourceLang)) {
+    try {
+      const rescued = await rescueTranslateToZhTW({
+        apiKey,
+        model,
+        text: sourceText || translated,
+        sourceLang,
+        signal,
+      });
+      if (rescued) translated = rescued.trim();
+    } catch (_) {}
+  }
 
   return {
     sourceLang: isSourceChinese ? 'zh' : sourceLang,

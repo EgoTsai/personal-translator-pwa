@@ -2,17 +2,18 @@
  * app.js — Main UI controller for 隨身口譯官 PWA
  */
 
-import { AudioEngine } from './audio.js?v=2.5';
+import { AudioEngine } from './audio.js?v=2.6';
 import {
   TARGET_LANGUAGES,
   ICEBREAKER_BANNERS,
+  interpretDialogueAudio,
   interpretListeningAudio,
   translateOutboundChinese,
   translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
-} from './gemini.js?v=2.5';
-import { GeminiLiveClient } from './live.js?v=2.5';
+} from './gemini.js?v=2.6';
+import { GeminiLiveClient } from './live.js?v=2.6';
 
 const STORAGE_KEYS = {
   settings: 'pt_settings_v1',
@@ -21,18 +22,20 @@ const STORAGE_KEYS = {
 };
 
 const DEFAULT_SETTINGS = {
-  settingsVersion: 2,
+  settingsVersion: 3,
   apiKey: '',
   model: 'gemini-3.5-flash-lite',
   liveModel: 'gemini-3.8-live',
   ttsModel: 'gemini-3.8-flash-lite-tts',
   voiceName: 'Kore',
   tone: 'natural',
-  silenceMs: 850,
+  silenceMs: 750,
   vadThreshold: 0.018,
   showOriginal: true,
   draftCaption: true,
   liveAutoSpeak: false,
+  useLiveInDialogue: false,
+  turboMode: false,
   targetLang: 'en',
   autoTts: false,
   theme: 'light',
@@ -56,14 +59,16 @@ const TONE_META = {
 };
 const TONE_ORDER = ['natural', 'polite', 'casual'];
 
-// State + one-time migration so v2.1 users upgrading get Plan A's faster 850ms silence default
+// State + seamless settings migration across versions
 const storedSettings = loadJson(STORAGE_KEYS.settings, null);
 let settings = { ...DEFAULT_SETTINGS, ...(storedSettings || {}) };
-if (storedSettings && !storedSettings.settingsVersion) {
-  if (Number(storedSettings.silenceMs) === 1300) {
-    settings.silenceMs = 850;
+if (storedSettings && Number(storedSettings.settingsVersion || 0) < 3) {
+  const legacySilenceMap = { 650: 600, 850: 750, 1300: 1100, 1800: 1600 };
+  const curSil = Number(storedSettings.silenceMs);
+  if (legacySilenceMap[curSil]) {
+    settings.silenceMs = legacySilenceMap[curSil];
   }
-  settings.settingsVersion = 2;
+  settings.settingsVersion = 3;
   try {
     localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(settings));
   } catch (_) {}
@@ -72,8 +77,9 @@ if (storedSettings && !storedSettings.settingsVersion) {
 let messages = loadJson(STORAGE_KEYS.messages, []);
 let speakerMemory = loadJson(STORAGE_KEYS.speakers, {}); // { A: { voiceHint, customName } }
 
-let isListening = false;
-let isLiveMode = false; // Always defaults to Plan A (false) on launch to protect credits
+// Scenario & engine state: activeMode is null | 'dialogue' | 'broadcast'
+let activeMode = null;
+let isLiveActive = false; // Optional Gemini Live WebSocket (only inside 'dialogue' when enabled in Settings)
 let liveConnected = false;
 let liveConnecting = false;
 let liveStartTs = 0;
@@ -81,18 +87,82 @@ let liveTimerHandle = null;
 let liveIdleHandle = null;
 let liveInboundCount = 0;
 let sessionEpoch = 0; // Monotonic guard against rapid toggle race conditions
+let feedEpoch = 0; // Monotonic guard so cleared chats don't receive stale in-flight cards
 let isManualRecording = false;
 let manualTimerHandle = null;
 let manualStartTime = 0;
 let isOnline = typeof navigator !== 'undefined' && 'onLine' in navigator ? navigator.onLine : true;
 
+// Turbo ≤ 2x hard quota rate guardrail (sliding 60s window: max 12 auto-segments/min = 2x normal cadence)
+const MAX_TURBO_AUTO_PER_MIN = 12;
+const turboAutoEmitTimestamps = [];
+let turboThrottled = false;
+let turboCooldownTimer = null;
+
+/**
+ * Pure scenario × Turbo parameter profile balancing Quota (strictly ≤ 2x) vs Speed/Efficiency.
+ */
+export function getAudioProfile(mode, turbo, baseSilenceMs = 750, throttled = false) {
+  const effectiveTurbo = Boolean(turbo && !throttled);
+  const safeBaseSilence = Number(baseSilenceMs) || 750;
+
+  if (mode === 'broadcast') {
+    return effectiveTurbo
+      ? {
+          mode: 'broadcast',
+          minBatchMs: 4500,
+          interSentencePauseMs: 300,
+          silenceMs: 1050,
+          maxChunkMs: 9500,
+          uploadSampleRate: 10000,
+          maxConcurrency: 2,
+          contextLimit: 2,
+        }
+      : {
+          mode: 'broadcast',
+          minBatchMs: 9000,
+          interSentencePauseMs: 420,
+          silenceMs: 1700,
+          maxChunkMs: 17500,
+          uploadSampleRate: 12000,
+          maxConcurrency: 1,
+          contextLimit: 4,
+        };
+  }
+
+  // Scenario 1: 'dialogue' (bidirectional automatic conversation)
+  return effectiveTurbo
+    ? {
+        mode: 'dialogue',
+        minBatchMs: 0,
+        interSentencePauseMs: 300,
+        silenceMs: Math.min(480, Math.max(400, Math.round(safeBaseSilence * 0.64))),
+        maxChunkMs: 7500,
+        uploadSampleRate: 10000,
+        maxConcurrency: 2,
+        contextLimit: 2,
+      }
+    : {
+        mode: 'dialogue',
+        minBatchMs: 0,
+        interSentencePauseMs: 400,
+        silenceMs: safeBaseSilence,
+        maxChunkMs: 12000,
+        uploadSampleRate: 12000,
+        maxConcurrency: 1,
+        contextLimit: 4,
+      };
+}
+
 // TTS concurrency guard (prevents rapid 🔊 clicks from playing out of order)
 let speakRequestSeq = 0;
 let activeSpeakAbort = null;
 
-// Sequential queue for Plan A VAD segments so speaker continuity stays ordered
-const vadQueue = [];
-let vadProcessing = false;
+// Ordered parallel pipeline for VAD segments (concurrency 1 in Standard, concurrency 2 in Turbo; FIFO commit order)
+const vadPendingJobs = [];
+const vadCommitQueue = [];
+let vadInFlight = 0;
+let vadJobSeq = 0;
 let pendingCount = 0;
 let activeShowcardMsg = null;
 let wakeLockSentinel = null;
@@ -119,7 +189,7 @@ function haptic(pattern = 12) {
 // Keep screen awake while listening, recording, or displaying face-to-face Showcard
 async function syncWakeLock() {
   if (!('wakeLock' in navigator)) return;
-  const shouldLock = isListening || isManualRecording || Boolean(activeShowcardMsg);
+  const shouldLock = Boolean(activeMode) || isManualRecording || Boolean(activeShowcardMsg);
   if (shouldLock && !wakeLockSentinel && document.visibilityState === 'visible') {
     try {
       wakeLockSentinel = await navigator.wakeLock.request('screen');
@@ -150,16 +220,17 @@ const els = {
   appShell: $('appShell'),
   statusDot: $('statusDot'),
   statusText: $('statusText'),
+  turboBtn: $('turboBtn'),
   toneQuickBtn: $('toneQuickBtn'),
   themeBtn: $('themeBtn'),
   exportBtn: $('exportBtn'),
   clearBtn: $('clearBtn'),
   settingsBtn: $('settingsBtn'),
   langBar: $('langBar'),
-  listenSwitch: $('listenSwitch'),
-  listenSub: $('listenSub'),
-  liveModeSwitch: $('liveModeSwitch'),
-  liveModeSub: $('liveModeSub'),
+  dialogueSwitch: $('dialogueSwitch'),
+  dialogueSub: $('dialogueSub'),
+  broadcastSwitch: $('broadcastSwitch'),
+  broadcastSub: $('broadcastSub'),
   listenStrip: $('listenStrip'),
   liveTimerPill: $('liveTimerPill'),
   waveBars: $('waveBars'),
@@ -188,6 +259,7 @@ const els = {
   testKeyBtn: $('testKeyBtn'),
   testResult: $('testResult'),
   modelSelect: $('modelSelect'),
+  useLiveInDialogueCheck: $('useLiveInDialogueCheck'),
   liveModelSelect: $('liveModelSelect'),
   ttsModelSelect: $('ttsModelSelect'),
   voiceSelect: $('voiceSelect'),
@@ -308,13 +380,13 @@ function updateHeaderStatus() {
     els.statusText.textContent = '正在收錄語音⋯';
     return;
   }
-  if (isListening && isLiveMode) {
+  if (activeMode === 'dialogue' && isLiveActive) {
     if (liveConnecting) {
       els.statusDot.classList.add('processing');
       els.statusText.textContent = '⚡ Live 串流連線中⋯';
     } else if (liveConnected) {
       els.statusDot.classList.add('live-ws');
-      els.statusText.textContent = '⚡ Live 雙向串流中・螢幕恆亮';
+      els.statusText.textContent = '⚡ Live 雙向對話・螢幕恆亮';
     } else {
       els.statusDot.classList.add('processing');
       els.statusText.textContent = '⚡ Live 準備中⋯';
@@ -323,51 +395,104 @@ function updateHeaderStatus() {
   }
   if (pendingCount > 0) {
     els.statusDot.classList.add('processing');
-    els.statusText.textContent = `Gemini 串流翻譯中 (${pendingCount})⋯`;
+    if (settings.turboMode && !turboThrottled) {
+      els.statusText.textContent =
+        pendingCount > 1 ? `⚡ Turbo 並行快翻 (${pendingCount})⋯` : '⚡ Turbo 極速翻譯中⋯';
+    } else {
+      els.statusText.textContent = `Gemini 串流翻譯中 (${pendingCount})⋯`;
+    }
     return;
   }
-  if (isListening) {
+  if (activeMode === 'dialogue') {
+    els.statusDot.classList.add('dialogue');
+    els.statusText.textContent = settings.turboMode
+      ? turboThrottled
+        ? '💬 對話中・2x額度保護'
+        : '⚡ 對話極速中・螢幕恆亮'
+      : '💬 自動對話中・螢幕恆亮';
+    return;
+  }
+  if (activeMode === 'broadcast') {
     els.statusDot.classList.add('listening');
-    els.statusText.textContent = '極速聆聽中・螢幕恆亮';
+    els.statusText.textContent = settings.turboMode
+      ? turboThrottled
+        ? '📻 聆聽中・2x額度保護'
+        : '⚡ 聆聽快翻中・螢幕恆亮'
+      : '📻 聆聽連翻中・螢幕恆亮';
     return;
   }
   els.statusDot.classList.add('ready');
-  els.statusText.textContent = settings.apiKey ? '已連線・待命中（極速方案 A）' : '尚未設定 API Key';
+  if (!settings.apiKey) {
+    els.statusText.textContent = '尚未設定 API Key';
+  } else {
+    els.statusText.textContent = settings.turboMode ? '待命中・⚡ Turbo (≤2x)' : '待命中・標準省額度';
+  }
 }
 
 function updateSwitchUI() {
-  // Listening Master Switch
-  els.listenSwitch.classList.toggle('listen-on', isListening);
-  els.listenSwitch.setAttribute('aria-checked', String(isListening));
-  els.listenSub.textContent = isListening
-    ? (isLiveMode ? 'Live 雙向口譯中' : '極速聆聽中・防休眠')
-    : '極速串流・防休眠';
+  const langInfo = TARGET_LANGUAGES[settings.targetLang] || TARGET_LANGUAGES.en;
+  const shortTarget = LANG_BADGE_MAP[langInfo.code] || langInfo.label;
 
-  // Live Streaming Mode Switch
-  if (els.liveModeSwitch) {
-    els.liveModeSwitch.classList.toggle('live-on', isLiveMode);
-    els.liveModeSwitch.setAttribute('aria-checked', String(isLiveMode));
+  // Top-right Turbo Button (strictly ≤ 2x quota budget)
+  if (els.turboBtn) {
+    const isOn = Boolean(settings.turboMode);
+    els.turboBtn.classList.toggle('on', isOn);
+    els.turboBtn.classList.toggle('throttled', isOn && turboThrottled);
+    els.turboBtn.setAttribute('aria-checked', String(isOn));
+    els.turboBtn.textContent = isOn && turboThrottled ? '⚡ 2x限速' : '⚡ Turbo';
   }
-  if (els.liveModeSub) {
-    if (!isLiveMode) {
-      els.liveModeSub.textContent = '關閉（極速省額度）';
-    } else if (liveConnecting) {
-      els.liveModeSub.textContent = '正在建立連線⋯';
-    } else if (isListening && liveConnected) {
-      els.liveModeSub.textContent = '超低延遲連線中';
+
+  // Scenario 1: 對話 (Bidirectional Auto-Listening)
+  const isDialogueOn = activeMode === 'dialogue';
+  if (els.dialogueSwitch) {
+    els.dialogueSwitch.classList.toggle('dialogue-on', isDialogueOn && !isLiveActive);
+    els.dialogueSwitch.classList.toggle('live-on', isDialogueOn && isLiveActive);
+    els.dialogueSwitch.setAttribute('aria-checked', String(isDialogueOn));
+  }
+  if (els.dialogueSub) {
+    if (isDialogueOn && isLiveActive) {
+      els.dialogueSub.textContent = liveConnecting ? 'Live 連線中⋯' : 'Live 雙向串流中';
+    } else if (isDialogueOn) {
+      els.dialogueSub.textContent =
+        settings.turboMode && !turboThrottled
+          ? `⚡ 並行極速（中↔${shortTarget}）`
+          : `中 ↔ ${shortTarget} 雙向聆聽中`;
+    } else if (settings.useLiveInDialogue) {
+      els.dialogueSub.textContent = `中 ↔ ${shortTarget}（Live）`;
     } else {
-      els.liveModeSub.textContent = '已待機（未計費）';
+      els.dialogueSub.textContent = `中 ↔ ${shortTarget} 自動互譯`;
     }
   }
 
-  // Listening Strip
-  els.listenStrip.classList.toggle('visible', isListening);
-  els.listenStrip.classList.toggle('live-mode', isListening && isLiveMode);
+  // Scenario 2: 聆聽翻譯 (2–3 Sentence News/Lecture Continuous)
+  const isBroadcastOn = activeMode === 'broadcast';
+  if (els.broadcastSwitch) {
+    els.broadcastSwitch.classList.toggle('broadcast-on', isBroadcastOn);
+    els.broadcastSwitch.setAttribute('aria-checked', String(isBroadcastOn));
+  }
+  if (els.broadcastSub) {
+    if (isBroadcastOn) {
+      els.broadcastSub.textContent =
+        settings.turboMode && !turboThrottled ? '⚡ 1-2句並行快翻中' : '2-3句連翻中・防休眠';
+    } else {
+      els.broadcastSub.textContent = settings.turboMode ? '1-2句並行・Turbo' : '2-3句連翻・省額度';
+    }
+  }
+
+  // Live Meter / Listening Strip
+  els.listenStrip.classList.toggle('visible', Boolean(activeMode));
+  els.listenStrip.classList.toggle('dialogue-mode', isDialogueOn && !isLiveActive);
+  els.listenStrip.classList.toggle('broadcast-mode', isBroadcastOn);
+  els.listenStrip.classList.toggle('live-mode', isDialogueOn && isLiveActive);
   if (els.liveTimerPill) {
-    els.liveTimerPill.classList.toggle('hidden', !(isListening && isLiveMode && liveConnected));
+    els.liveTimerPill.classList.toggle('hidden', !(isDialogueOn && isLiveActive && liveConnected));
   }
   if (els.flushBtn) {
-    els.flushBtn.textContent = isListening && isLiveMode ? '送出此句' : '立即送出';
+    els.flushBtn.textContent = isLiveActive
+      ? '送出此句'
+      : isBroadcastOn
+        ? '立即翻這段'
+        : '立即送出';
   }
 
   // Tone Quick Chip
@@ -378,8 +503,6 @@ function updateSwitchUI() {
   }
 
   // Target language pills & outbound button label
-  const langInfo = TARGET_LANGUAGES[settings.targetLang] || TARGET_LANGUAGES.en;
-  const shortTarget = LANG_BADGE_MAP[langInfo.code] || langInfo.label;
   els.langBar.querySelectorAll('.lang-pill').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.lang === settings.targetLang);
   });
@@ -1055,7 +1178,7 @@ const DRAFT_LOCALE_MAP = {
 };
 
 function startDraftRecognition(langCode = 'zh') {
-  if (!settings.draftCaption || draftRecognitionDisabled || isLiveMode) return;
+  if (!settings.draftCaption || draftRecognitionDisabled || isLiveActive) return;
   const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRec) return;
 
@@ -1090,7 +1213,7 @@ function startDraftRecognition(langCode = 'zh') {
     };
 
     rec.onend = () => {
-      if (draftRecognitionActive && !draftRecognitionDisabled && (isListening || isManualRecording) && !isLiveMode) {
+      if (draftRecognitionActive && !draftRecognitionDisabled && (Boolean(activeMode) || isManualRecording) && !isLiveActive) {
         try {
           rec.start();
         } catch (_) {
@@ -1179,7 +1302,8 @@ function startLiveTimers() {
     if (Date.now() - liveClient.lastActivityTs >= 5 * 60 * 1000) {
       sessionEpoch += 1;
       stopLiveSession(true);
-      isListening = false;
+      activeMode = null;
+      isLiveActive = false;
       syncWakeLock();
       updateSwitchUI();
       showToast('Live 串流已靜音 5 分鐘，自動斷線以節省額度', 4200);
@@ -1197,7 +1321,7 @@ liveClient.onStateChange = (state, detail) => {
     liveConnecting = false;
     liveConnected = true;
     startLiveTimers();
-    els.vadStatus.textContent = '⚡ Live 雙向串流已連線・直接開口即可即時翻譯';
+    els.vadStatus.textContent = '⚡ Live 雙向對話已連線・直接開口即可即時口譯';
     updateSwitchUI();
   } else if (state === 'closed') {
     const wasActive = liveConnected;
@@ -1205,9 +1329,10 @@ liveClient.onStateChange = (state, detail) => {
     liveConnected = false;
     stopLiveTimers();
     clearStreamingCardDom();
-    if (wasActive && isListening && isLiveMode) {
+    if (wasActive && activeMode === 'dialogue' && isLiveActive) {
       audio.stopLiveStream();
-      isListening = false;
+      activeMode = null;
+      isLiveActive = false;
       syncWakeLock();
       showToast(`Live 連線已關閉${detail || ''}`, 3200);
     }
@@ -1295,7 +1420,7 @@ liveClient.onTurnComplete = async ({ inputText, outputText, pcmChunks, sampleRat
 };
 
 liveClient.onGoAway = () => {
-  if (isListening && isLiveMode) {
+  if (activeMode === 'dialogue' && isLiveActive) {
     showToast('Live 連線即將到期，無縫續連中⋯', 2400);
     const epoch = ++sessionEpoch;
     startLiveSession({ resume: true, epoch }).catch(() => {});
@@ -1352,202 +1477,388 @@ function stopLiveSession(releaseMic = true) {
   }
 }
 
-// Live Mode Switch (Default OFF = Plan A; ON = Gemini Live WebSocket)
-async function toggleLiveMode() {
-  audio.unlockPlayback();
-  const epoch = ++sessionEpoch;
+// Turbo ≤ 2x quota guardrail helpers
+function pruneTurboWindow(now = Date.now()) {
+  const cutoff = now - 60000;
+  while (turboAutoEmitTimestamps.length > 0 && turboAutoEmitTimestamps[0] < cutoff) {
+    turboAutoEmitTimestamps.shift();
+  }
+  const shouldThrottle = Boolean(settings.turboMode && turboAutoEmitTimestamps.length >= MAX_TURBO_AUTO_PER_MIN);
+  if (turboThrottled && !shouldThrottle) {
+    turboThrottled = false;
+    applyActiveAudioProfile();
+    if (activeMode && !isLiveActive && !audio.isSpeaking) {
+      els.vadStatus.textContent = getIdleVadHint();
+    }
+    updateSwitchUI();
+    pumpVadPipeline();
+  }
+  return shouldThrottle;
+}
 
-  if (!isLiveMode) {
-    if (!settings.apiKey) {
-      showToast('請先填入 Gemini API Key 才能使用 Live 串流模式');
-      openSettings();
-      return;
-    }
-    if (!isOnline) {
-      showToast('目前處於離線狀態，無法開啟 Live 串流');
-      return;
-    }
-    isLiveMode = true;
-    haptic(15);
-    // 1-tap Live start: automatically engage Listening & connect WebSocket immediately!
-    isListening = true;
-    syncWakeLock();
+function recordTurboAutoEmit() {
+  if (!settings.turboMode) return;
+  const now = Date.now();
+  pruneTurboWindow(now);
+  turboAutoEmitTimestamps.push(now);
+
+  if (turboAutoEmitTimestamps.length >= MAX_TURBO_AUTO_PER_MIN) {
+    const wasThrottled = turboThrottled;
+    turboThrottled = true;
+    applyActiveAudioProfile();
     updateSwitchUI();
-    showToast('⚡ 正在連線 Gemini Live 超低延遲串流⋯', 2200);
-    try {
-      await startLiveSession({ resume: false, epoch });
-      if (epoch !== sessionEpoch) return;
-      showToast('⚡ Live 雙向串流已就緒（點 🔊 可 0 秒重播）');
-    } catch (err) {
-      if (epoch !== sessionEpoch) return;
-      console.error('Live start error:', err);
-      isLiveMode = false;
-      isListening = false;
-      syncWakeLock();
-      updateSwitchUI();
-      showToast(err.message || 'Live 連線失敗，已切回方案 A', 4000);
+    if (!wasThrottled) {
+      showToast('⚡ Turbo 已達每分鐘 2x 額度上限，自動降速保護中', 3400);
     }
-  } else {
-    isLiveMode = false;
-    haptic(10);
-    if (isListening) {
-      stopLiveSession(false);
-      try {
-        audio.configureVad({
-          threshold: Number(settings.vadThreshold),
-          silenceMs: Number(settings.silenceMs),
-        });
-        await audio.startListening();
-        if (epoch !== sessionEpoch) return;
-        startDraftRecognition(settings.targetLang);
-        els.vadStatus.textContent = '極速聆聽中⋯停頓即串流翻譯';
-        showToast('已切回標準串流（方案 A・省額度）');
-      } catch (err) {
-        if (epoch !== sessionEpoch) return;
-        isListening = false;
-        audio.stopListening();
-        showToast(`切回失敗：${err.message}`, 3500);
-      }
-    } else {
-      stopLiveSession(true);
-      showToast('已關閉 Live 串流模式（預設方案 A）');
-    }
-    syncWakeLock();
-    updateSwitchUI();
+    clearTimeout(turboCooldownTimer);
+    const waitMs = Math.max(1200, turboAutoEmitTimestamps[0] + 60000 - now + 250);
+    turboCooldownTimer = setTimeout(() => {
+      pruneTurboWindow();
+    }, waitMs);
   }
 }
 
-// Listening Switch (with Screen Wake Lock + haptic — uses Plan A by default, or Live when toggled ON)
-async function toggleListening() {
+function applyActiveAudioProfile() {
+  const profile = getAudioProfile(
+    activeMode || 'dialogue',
+    settings.turboMode,
+    settings.silenceMs,
+    turboThrottled
+  );
+  audio.configureVad({
+    threshold: Number(settings.vadThreshold),
+    mode: profile.mode,
+    silenceMs: profile.silenceMs,
+    minBatchMs: profile.minBatchMs,
+    interSentencePauseMs: profile.interSentencePauseMs,
+    maxChunkMs: profile.maxChunkMs,
+    uploadSampleRate: profile.uploadSampleRate,
+  });
+  return profile;
+}
+
+function getIdleVadHint() {
+  const langInfo = TARGET_LANGUAGES[settings.targetLang] || TARGET_LANGUAGES.en;
+  const shortTarget = LANG_BADGE_MAP[langInfo.code] || langInfo.label;
+  if (activeMode === 'broadcast') {
+    if (settings.turboMode && !turboThrottled) {
+      return '⚡ Turbo 聆聽中⋯每 1–2 句並行快翻（≤2x 額度）';
+    }
+    if (settings.turboMode && turboThrottled) {
+      return '📻 聆聽中（2x 額度保護中・每 2–3 句自動翻）';
+    }
+    return '📻 聆聽新聞／演講中⋯滿 2–3 句自動連翻';
+  }
+  if (settings.turboMode && !turboThrottled) {
+    return `⚡ Turbo 雙向對話（中↔${shortTarget}）⋯停頓即並行快翻`;
+  }
+  if (settings.turboMode && turboThrottled) {
+    return `💬 雙向對話（2x 額度保護中・中↔${shortTarget}）`;
+  }
+  return `💬 自動雙向對話中⋯外語翻中文、中文翻${langInfo.label}`;
+}
+
+// Top-right Turbo toggle: accelerates both scenarios strictly within a 2x quota ceiling
+function toggleTurboMode() {
+  settings.turboMode = !settings.turboMode;
+  haptic(12);
+  if (!settings.turboMode) {
+    turboThrottled = false;
+    clearTimeout(turboCooldownTimer);
+  } else {
+    pruneTurboWindow();
+  }
+  applyActiveAudioProfile();
+  saveState();
+  if (activeMode && !isLiveActive && !audio.isSpeaking) {
+    els.vadStatus.textContent = getIdleVadHint();
+  }
+  updateSwitchUI();
+  pumpVadPipeline();
+
+  if (settings.turboMode) {
+    if (activeMode === 'dialogue' && isLiveActive) {
+      showToast('⚡ Turbo 已開啟（已記憶；目前為 Live 進階串流）', 2600);
+    } else if (activeMode === 'broadcast') {
+      showToast('⚡ Turbo 開啟：縮短為 1–2 句並雙路並行快翻（額度 ≤ 2x）', 3000);
+    } else {
+      showToast('⚡ Turbo 開啟：極速斷句＋雙路並行快翻（額度上限 ≤ 2x）', 3000);
+    }
+  } else {
+    showToast('已關閉 Turbo，切回標準省額度模式（1x）', 2400);
+  }
+}
+
+// Dual Scenario Switcher: 'dialogue' (自動雙向對話) & 'broadcast' (新聞／演講 2–3 句連翻)
+async function toggleScenario(targetMode) {
   audio.unlockPlayback();
   const epoch = ++sessionEpoch;
 
-  if (!isListening) {
-    if (!settings.apiKey) {
-      showToast('請先填入 Gemini API Key 才能啟用即時聆聽');
-      openSettings();
-      return;
-    }
-    if (!isOnline) {
-      showToast('目前處於離線狀態，請確認網路連線');
-      return;
-    }
-    try {
-      if (isLiveMode) {
-        isListening = true;
-        haptic(15);
-        syncWakeLock();
-        updateSwitchUI();
-        await startLiveSession({ resume: false, epoch });
-        if (epoch !== sessionEpoch) return;
-        showToast('⚡ Live 雙向串流已開啟（螢幕自動防休眠）');
-      } else {
-        audio.configureVad({
-          threshold: Number(settings.vadThreshold),
-          silenceMs: Number(settings.silenceMs),
-        });
-        await audio.startListening();
-        if (epoch !== sessionEpoch) return;
-        isListening = true;
-        startDraftRecognition(settings.targetLang);
-        haptic(15);
-        syncWakeLock();
-        updateSwitchUI();
-        els.vadStatus.textContent = '極速聆聽中⋯停頓即串流翻譯';
-        showToast('即時聆聽已開啟（方案 A 極速串流・防休眠）');
-      }
-    } catch (err) {
-      if (epoch !== sessionEpoch) return;
-      console.error(err);
-      isListening = false;
-      syncWakeLock();
-      updateSwitchUI();
-      showToast(`無法啟動聆聽：${err.message}`, 3800);
-    }
-  } else {
-    if (isLiveMode) {
+  // Tapping the already-active scenario turns listening OFF
+  if (activeMode === targetMode) {
+    const prevMode = activeMode;
+    if (isLiveActive) {
       stopLiveSession(true);
     } else {
       stopDraftRecognition(true);
       audio.stopListening();
     }
-    isListening = false;
+    activeMode = null;
+    isLiveActive = false;
     haptic(10);
     syncWakeLock();
     updateSwitchUI();
-    showToast('已關閉即時聆聽');
+    showToast(prevMode === 'broadcast' ? '已關閉「聆聽翻譯」' : '已關閉「對話」模式');
+    return;
+  }
+
+  if (!settings.apiKey) {
+    showToast('請先填入 Gemini API Key 才能啟動自動翻譯');
+    openSettings();
+    return;
+  }
+  if (!isOnline) {
+    showToast('目前處於離線狀態，請確認網路連線');
+    return;
+  }
+
+  const switchingBetweenVadModes = Boolean(activeMode && !isLiveActive);
+  const switchingFromLive = Boolean(activeMode && isLiveActive);
+
+  // Flush any already-spoken buffer under the previous scenario before switching modes
+  if (switchingBetweenVadModes) {
+    audio.flushListeningNow();
+  } else if (switchingFromLive) {
+    stopLiveSession(false);
+  }
+
+  const wantsLive = targetMode === 'dialogue' && Boolean(settings.useLiveInDialogue);
+
+  if (wantsLive) {
+    activeMode = 'dialogue';
+    isLiveActive = true;
+    haptic(15);
+    syncWakeLock();
+    updateSwitchUI();
+    showToast('⚡ 正在連線 Gemini Live 雙向對話⋯', 2200);
+    try {
+      await startLiveSession({ resume: false, epoch });
+      if (epoch !== sessionEpoch) return;
+      showToast('⚡ Live 雙向對話已就緒（點 🔊 可 0 秒重播）');
+      return;
+    } catch (err) {
+      if (epoch !== sessionEpoch) return;
+      console.error('Live dialogue error, falling back to SSE dialogue:', err);
+      isLiveActive = false;
+      showToast('Live 連線失敗，已自動切回標準對話模式', 3200);
+    }
+  }
+
+  // Standard / Turbo SSE streaming engine (optimal Quota × Efficiency balance)
+  try {
+    activeMode = targetMode;
+    isLiveActive = false;
+    applyActiveAudioProfile();
+
+    if (!audio.listening) {
+      await audio.startListening();
+      if (epoch !== sessionEpoch) return;
+    }
+
+    startDraftRecognition(settings.targetLang);
+    haptic(15);
+    syncWakeLock();
+    els.vadStatus.textContent = getIdleVadHint();
+    updateSwitchUI();
+
+    const langInfo = TARGET_LANGUAGES[settings.targetLang] || TARGET_LANGUAGES.en;
+    if (targetMode === 'broadcast') {
+      showToast(
+        settings.turboMode
+          ? '⚡ 聆聽翻譯（Turbo）：1–2 句並行連翻成中文・防休眠'
+          : '📻 聆聽翻譯已開啟：每 2–3 句自動連翻成中文・省額度',
+        2800
+      );
+    } else {
+      showToast(
+        settings.turboMode
+          ? `⚡ 對話模式（Turbo）：中 ↔ ${langInfo.label} 並行自動互譯`
+          : `💬 對話模式已開啟：外語→中文、中文→${langInfo.label}`,
+        2800
+      );
+    }
+  } catch (err) {
+    if (epoch !== sessionEpoch) return;
+    console.error('Scenario start error:', err);
+    activeMode = null;
+    isLiveActive = false;
+    audio.stopListening();
+    syncWakeLock();
+    updateSwitchUI();
+    showToast(`無法啟動麥克風：${err.message}`, 3800);
   }
 }
 
+// Ordered Parallel VAD Pipeline (concurrency = 1 Standard, concurrency = 2 Turbo; strict FIFO commit order)
 function enqueueVadSegment(wav) {
   upsertDraftCaptionDom('');
-  vadQueue.push(wav);
+  const modeAtCapture = activeMode || 'dialogue';
+  recordTurboAutoEmit();
+  const profile = getAudioProfile(modeAtCapture, settings.turboMode, settings.silenceMs, turboThrottled);
+
+  const job = {
+    seq: ++vadJobSeq,
+    wav,
+    mode: modeAtCapture,
+    targetLang: settings.targetLang,
+    tone: settings.tone,
+    contextLimit: profile.contextLimit,
+    feedEpoch,
+    done: false,
+    utterances: null,
+    error: null,
+    latestStream: null,
+  };
+
+  vadPendingJobs.push(job);
+  vadCommitQueue.push(job);
   pendingCount += 1;
   syncPendingPillDom();
   updateHeaderStatus();
-  processVadQueue();
+  pumpVadPipeline();
 }
 
-async function processVadQueue() {
-  if (vadProcessing) return;
-  vadProcessing = true;
+function pumpVadPipeline() {
+  const maxConc = settings.turboMode && !turboThrottled ? 2 : 1;
+  while (vadInFlight < maxConc && vadPendingJobs.length > 0) {
+    const job = vadPendingJobs.shift();
+    if (job.feedEpoch !== feedEpoch) {
+      job.done = true;
+      drainVadCommits();
+      continue;
+    }
+    vadInFlight += 1;
+    runVadJob(job);
+  }
+}
 
-  while (vadQueue.length > 0) {
-    const wav = vadQueue.shift();
-    try {
-      const utterances = await interpretListeningAudio({
+async function runVadJob(job) {
+  try {
+    const onStream = (chunk) => {
+      job.latestStream = chunk;
+      // Only paint live streaming card for the oldest uncommitted job so parallel Turbo jobs never flicker!
+      if (vadCommitQueue[0] === job && job.feedEpoch === feedEpoch) {
+        upsertDraftCaptionDom('');
+        upsertStreamingCardDom(chunk);
+      }
+    };
+
+    if (job.mode === 'dialogue') {
+      job.utterances = await interpretDialogueAudio({
         apiKey: settings.apiKey,
         model: settings.model,
-        wavBase64: wav.base64,
-        mimeType: wav.mimeType,
-        preferredLang: settings.targetLang,
+        wavBase64: job.wav.base64,
+        mimeType: job.wav.mimeType,
+        targetLang: job.targetLang,
+        tone: job.tone,
         speakerMemory,
-        recentContext: messages.slice(-6),
-        onStream: (chunk) => {
-          upsertDraftCaptionDom('');
-          upsertStreamingCardDom(chunk);
-        },
+        recentContext: messages.slice(-job.contextLimit),
+        contextLimit: job.contextLimit,
+        onStream,
       });
+    } else {
+      job.utterances = await interpretListeningAudio({
+        apiKey: settings.apiKey,
+        model: settings.model,
+        wavBase64: job.wav.base64,
+        mimeType: job.wav.mimeType,
+        preferredLang: job.targetLang,
+        mode: 'broadcast',
+        speakerMemory,
+        recentContext: messages.slice(-job.contextLimit),
+        contextLimit: job.contextLimit,
+        onStream,
+      });
+    }
+  } catch (err) {
+    job.error = err;
+  } finally {
+    job.done = true;
+    vadInFlight = Math.max(0, vadInFlight - 1);
+    drainVadCommits();
+    pumpVadPipeline();
+  }
+}
 
-      clearStreamingCardDom();
-      const newlyAdded = [];
-      for (const u of utterances) {
+function drainVadCommits() {
+  let addedAny = false;
+
+  while (vadCommitQueue.length > 0 && vadCommitQueue[0].done) {
+    const job = vadCommitQueue.shift();
+    if (pendingCount > 0) pendingCount -= 1;
+
+    if (job.feedEpoch !== feedEpoch) {
+      continue;
+    }
+
+    clearStreamingCardDom();
+
+    if (job.error) {
+      console.error('VAD interpret error:', job.error);
+      showToast(job.error.message || '翻譯失敗，請稍後再試', 3800);
+      continue;
+    }
+
+    const utterances = Array.isArray(job.utterances) ? job.utterances : [];
+    for (const u of utterances) {
+      let msg;
+      if (u.direction === 'outbound') {
+        msg = {
+          id: makeId(),
+          direction: 'outbound',
+          speaker: '我',
+          lang: 'zh',
+          targetLang: u.targetLang || job.targetLang,
+          isChinese: true,
+          zh: u.zh || u.original,
+          translated: u.translated || u.zh,
+          reading: u.reading || '',
+          time: nowTimeStr(),
+        };
+      } else {
         if (!speakerMemory[u.speaker]) {
-          speakerMemory[u.speaker] = { voiceHint: u.voiceHint, customName: '' };
+          speakerMemory[u.speaker] = { voiceHint: u.voiceHint || '', customName: '' };
         } else if (u.voiceHint) {
           speakerMemory[u.speaker].voiceHint = u.voiceHint;
         }
-
-        const msg = {
+        msg = {
           id: makeId(),
           direction: 'inbound',
-          speaker: u.speaker,
-          lang: u.lang,
-          isChinese: u.isChinese,
+          speaker: u.speaker || 'A',
+          lang: u.sourceLang || u.lang || job.targetLang,
+          isChinese: Boolean(u.isChinese),
           original: u.original,
           zh: u.zh,
           time: nowTimeStr(),
         };
-        messages.push(msg);
-        newlyAdded.push(msg);
-        appendMessageCard(msg);
       }
 
-      if (newlyAdded.length > 0) {
-        saveState();
-      }
-    } catch (err) {
-      clearStreamingCardDom();
-      console.error('VAD interpret error:', err);
-      showToast(err.message, 3800);
-    } finally {
-      if (pendingCount > 0) pendingCount -= 1;
-      syncPendingPillDom();
-      updateHeaderStatus();
+      messages.push(msg);
+      appendMessageCard(msg);
+      addedAny = true;
     }
   }
 
-  vadProcessing = false;
+  if (addedAny) {
+    saveState();
+  }
+
+  // If a second parallel Turbo job is already streaming tokens, hand off the live card smoothly
+  if (vadCommitQueue.length > 0 && vadCommitQueue[0].latestStream && vadCommitQueue[0].feedEpoch === feedEpoch) {
+    upsertStreamingCardDom(vadCommitQueue[0].latestStream);
+  }
+
+  syncPendingPillDom();
   updateHeaderStatus();
 }
 
@@ -1602,7 +1913,7 @@ async function finishManualRecording() {
   isManualRecording = false;
   speakHoldMode = false;
   stopDraftRecognition(true);
-  if (isListening && !isLiveMode) {
+  if (activeMode && !isLiveActive) {
     startDraftRecognition(settings.targetLang);
   }
   haptic([12, 35, 18]);
@@ -1680,7 +1991,7 @@ function cancelManualChineseSpeak() {
   manualTimerHandle = null;
   isManualRecording = false;
   stopDraftRecognition(true);
-  if (isListening && !isLiveMode) {
+  if (activeMode && !isLiveActive) {
     startDraftRecognition(settings.targetLang);
   }
   audio.cancelManualCapture();
@@ -1738,6 +2049,7 @@ async function runOutboundTranslation({ wav = null, textInput = null }) {
   pendingCount += 1;
   syncPendingPillDom();
   updateHeaderStatus();
+  const ctxLimit = settings.turboMode ? 2 : 5;
 
   try {
     const result = await translateOutboundChinese({
@@ -1748,7 +2060,8 @@ async function runOutboundTranslation({ wav = null, textInput = null }) {
       wavBase64: wav ? wav.base64 : null,
       mimeType: wav ? wav.mimeType : 'audio/wav',
       textInput,
-      recentContext: messages.slice(-6),
+      recentContext: messages.slice(-ctxLimit),
+      contextLimit: ctxLimit,
       onStream: (chunk) => {
         upsertDraftCaptionDom('');
         upsertStreamingCardDom(chunk);
@@ -1933,14 +2246,17 @@ function closeShowcard() {
 function openSettings() {
   els.apiKeyInput.value = settings.apiKey;
   els.modelSelect.value = settings.model;
+  if (els.useLiveInDialogueCheck) {
+    els.useLiveInDialogueCheck.checked = Boolean(settings.useLiveInDialogue);
+  }
   if (els.liveModelSelect) {
     els.liveModelSelect.value = settings.liveModel || 'gemini-3.8-live';
   }
   els.ttsModelSelect.value = settings.ttsModel;
   els.voiceSelect.value = settings.voiceName;
   els.toneSelect.value = settings.tone;
-  const validSilences = ['650', '850', '1300', '1800'];
-  const silStr = validSilences.includes(String(settings.silenceMs)) ? String(settings.silenceMs) : '850';
+  const validSilences = ['600', '750', '1100', '1600'];
+  const silStr = validSilences.includes(String(settings.silenceMs)) ? String(settings.silenceMs) : '750';
   els.silenceSelect.value = silStr;
   els.vadThresholdSelect.value = String(settings.vadThreshold);
   if (els.draftCaptionCheck) els.draftCaptionCheck.checked = Boolean(settings.draftCaption);
@@ -1961,10 +2277,12 @@ function saveSettingsFromForm() {
   const prevTts = settings.ttsModel;
   const prevVoice = settings.voiceName;
   const prevLiveModel = settings.liveModel;
+  const prevUseLive = Boolean(settings.useLiveInDialogue);
   const prevTone = settings.tone;
 
   settings.apiKey = els.apiKeyInput.value.trim();
   settings.model = els.modelSelect.value;
+  if (els.useLiveInDialogueCheck) settings.useLiveInDialogue = els.useLiveInDialogueCheck.checked;
   if (els.liveModelSelect) settings.liveModel = els.liveModelSelect.value;
   settings.ttsModel = els.ttsModelSelect.value;
   settings.voiceName = els.voiceSelect.value;
@@ -1979,25 +2297,49 @@ function saveSettingsFromForm() {
     audio.clearTtsCache();
   }
 
-  audio.configureVad({
-    threshold: settings.vadThreshold,
-    silenceMs: settings.silenceMs,
-  });
+  applyActiveAudioProfile();
 
   if (!settings.draftCaption) {
     stopDraftRecognition(true);
-  } else if (isListening && !isLiveMode) {
+  } else if (activeMode && !isLiveActive) {
     startDraftRecognition(settings.targetLang);
   }
 
-  // If Live session is active and Live model / voice / tone changed, reconnect smoothly
-  if (
-    isListening &&
-    isLiveMode &&
-    liveConnected &&
-    (prevLiveModel !== settings.liveModel || prevVoice !== settings.voiceName || prevTone !== settings.tone)
-  ) {
-    startLiveSession().catch((err) => showToast(`重新連線 Live 失敗：${err.message}`, 3500));
+  // If currently in Dialogue mode and Live toggle or Live parameters changed, transition cleanly
+  if (activeMode === 'dialogue') {
+    if (prevUseLive !== Boolean(settings.useLiveInDialogue)) {
+      const epoch = ++sessionEpoch;
+      if (settings.useLiveInDialogue) {
+        isLiveActive = true;
+        startLiveSession({ resume: false, epoch }).catch((err) => {
+          if (epoch !== sessionEpoch) return;
+          isLiveActive = false;
+          applyActiveAudioProfile();
+          audio.startListening().catch(() => {});
+          updateSwitchUI();
+          showToast(`Live 啟動失敗，維持標準對話：${err.message}`, 3500);
+        });
+      } else {
+        stopLiveSession(false);
+        isLiveActive = false;
+        applyActiveAudioProfile();
+        audio.startListening().then(() => {
+          if (epoch !== sessionEpoch) return;
+          startDraftRecognition(settings.targetLang);
+          els.vadStatus.textContent = getIdleVadHint();
+          updateSwitchUI();
+        }).catch(() => {});
+      }
+    } else if (
+      isLiveActive &&
+      liveConnected &&
+      (prevLiveModel !== settings.liveModel || prevVoice !== settings.voiceName || prevTone !== settings.tone)
+    ) {
+      const epoch = ++sessionEpoch;
+      startLiveSession({ resume: false, epoch }).catch((err) =>
+        showToast(`重新連線 Live 失敗：${err.message}`, 3500)
+      );
+    }
   }
 
   saveState();
@@ -2137,10 +2479,37 @@ audio.onLevel = (rms, mode) => {
 };
 
 audio.onVadStateChange = (speaking) => {
-  if (isLiveMode) return;
-  els.vadStatus.textContent = speaking
-    ? '偵測到人聲，收音中⋯停頓後將極速串流翻譯'
-    : '極速聆聽中⋯停頓即串流翻譯';
+  if (isLiveActive || !activeMode) return;
+  if (!speaking) {
+    els.vadStatus.textContent = getIdleVadHint();
+    return;
+  }
+  if (activeMode === 'broadcast') {
+    els.vadStatus.textContent =
+      settings.turboMode && !turboThrottled
+        ? '⚡ Turbo 收聽中⋯滿 1–2 句並行快翻'
+        : '📻 收聽語音中⋯累積 2–3 句後自動翻譯';
+  } else {
+    els.vadStatus.textContent =
+      settings.turboMode && !turboThrottled
+        ? '⚡ Turbo 收音中⋯停頓即並行互譯'
+        : '💬 偵測到對話，收音中⋯停頓後自動互譯';
+  }
+};
+
+audio.onCaptureProgress = (sec) => {
+  if (isLiveActive || !activeMode || !audio.isSpeaking) return;
+  if (activeMode === 'broadcast') {
+    els.vadStatus.textContent =
+      settings.turboMode && !turboThrottled
+        ? `⚡ Turbo 收聽中（${sec}s・滿 1–2 句並行快翻）`
+        : `📻 收聽中（已收 ${sec}s・滿 2–3 句自動翻）`;
+  } else if (sec >= 2) {
+    els.vadStatus.textContent =
+      settings.turboMode && !turboThrottled
+        ? `⚡ Turbo 對話收音中（${sec}s）`
+        : `💬 對話收音中（${sec}s・停頓自動互譯）`;
+  }
 };
 
 audio.onVadSegment = (wav) => {
@@ -2153,9 +2522,14 @@ audio.onPlaybackChange = () => {
 };
 
 // Event Wiring
-els.listenSwitch.addEventListener('click', toggleListening);
-if (els.liveModeSwitch) {
-  els.liveModeSwitch.addEventListener('click', toggleLiveMode);
+if (els.dialogueSwitch) {
+  els.dialogueSwitch.addEventListener('click', () => toggleScenario('dialogue'));
+}
+if (els.broadcastSwitch) {
+  els.broadcastSwitch.addEventListener('click', () => toggleScenario('broadcast'));
+}
+if (els.turboBtn) {
+  els.turboBtn.addEventListener('click', toggleTurboMode);
 }
 
 if (els.toneQuickBtn) {
@@ -2166,7 +2540,7 @@ if (els.toneQuickBtn) {
     saveState();
     updateSwitchUI();
     showToast((TONE_META[settings.tone] || TONE_META.natural).toast, 2200);
-    if (isListening && isLiveMode && liveConnected) {
+    if (activeMode === 'dialogue' && isLiveActive && liveConnected) {
       const epoch = ++sessionEpoch;
       startLiveSession({ resume: false, epoch }).catch(() => {});
     }
@@ -2181,19 +2555,22 @@ els.langBar.addEventListener('click', (e) => {
   haptic(8);
   saveState();
   updateSwitchUI();
-  if (changed && isListening) {
-    if (isLiveMode && liveConnected) {
+  if (changed && activeMode) {
+    if (activeMode === 'dialogue' && isLiveActive && liveConnected) {
       showToast(`Live 串流切換語言為「${(TARGET_LANGUAGES[settings.targetLang] || TARGET_LANGUAGES.en).label}」⋯`, 2000);
       const epoch = ++sessionEpoch;
       startLiveSession({ resume: false, epoch }).catch(() => {});
-    } else if (!isLiveMode) {
+    } else if (!isLiveActive) {
+      if (!audio.isSpeaking) {
+        els.vadStatus.textContent = getIdleVadHint();
+      }
       startDraftRecognition(settings.targetLang);
     }
   }
 });
 
 els.flushBtn.addEventListener('click', () => {
-  if (isListening && isLiveMode) {
+  if (activeMode === 'dialogue' && isLiveActive) {
     const ok = liveClient.flushAudioStream();
     showToast(ok ? '已送出目前語音片段' : 'Live 尚未連線就緒');
     return;
@@ -2282,7 +2659,9 @@ els.exportBtn.addEventListener('click', exportTranscript);
 els.clearBtn.addEventListener('click', () => {
   if (messages.length === 0) return;
   if (!window.confirm('確定要清除目前所有對話紀錄與說話者記憶嗎？')) return;
+  feedEpoch += 1;
   audio.stopPlayback();
+  clearStreamingCardDom();
   messages = [];
   speakerMemory = {};
   saveState();
@@ -2390,6 +2769,7 @@ if ('serviceWorker' in navigator) {
 }
 
 // Init
+applyActiveAudioProfile();
 applyTheme();
 updateSwitchUI();
 renderFeed();

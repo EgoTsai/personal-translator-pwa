@@ -15,7 +15,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=2.5" />
+  <link rel="stylesheet" href="./styles.css?v=2.6" />
 </head>
 <body>
   <div class="app-shell" id="appShell">
@@ -25,9 +25,9 @@
         <div class="brand">
           <div class="brand-mark" aria-hidden="true">譯</div>
           <div class="brand-text">
-            <div class="brand-title-row" style="display:flex;align-items:center;gap:6px;white-space:nowrap;">
+            <div class="brand-title-row" style="display:flex;align-items:center;gap:5px;white-space:nowrap;">
               <h1 class="brand-title">隨身口譯官</h1>
-              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v2.5</button>
+              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v2.6</button>
             </div>
             <div class="status-line">
               <span class="status-dot ready" id="statusDot"></span>
@@ -36,6 +36,7 @@
           </div>
         </div>
         <div class="header-actions">
+          <button class="turbo-btn" id="turboBtn" type="button" role="switch" aria-checked="false" title="開啟 Turbo 加速模式（在最高 2x 額度上限內，自動極速斷句與並行快翻）">⚡ Turbo</button>
           <button class="tone-chip" id="toneQuickBtn" type="button" title="點擊切換翻譯語氣（日常／禮貌敬語／口語）">日常</button>
           <button class="icon-btn" id="clearBtn" type="button" title="清除對話" aria-label="清除對話">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
@@ -84,26 +85,26 @@
       </nav>
     </header>
 
-    <!-- Dual Clean Switches: Listening + Optional Live Streaming Mode -->
-    <section class="switch-deck" aria-label="即時聆聽與 Live 串流開關">
-      <button class="switch-card" id="listenSwitch" type="button" role="switch" aria-checked="false">
+    <!-- Dual Scenario Switcher: 對話 (Bidirectional Auto) & 聆聽翻譯 (2-3 Sentence News/Lecture Continuous) -->
+    <section class="switch-deck" aria-label="情境模式選擇">
+      <button class="switch-card dialogue-switch-card" id="dialogueSwitch" type="button" role="switch" aria-checked="false" title="自動聆聽雙向對話：外語自動翻中文、中文自動翻目標外語">
         <div class="switch-meta">
-          <span class="switch-label">即時聆聽翻譯</span>
-          <span class="switch-sub" id="listenSub">極速串流・防休眠</span>
+          <span class="switch-label">💬 對話</span>
+          <span class="switch-sub" id="dialogueSub">中 ↔ 英自動互譯</span>
         </div>
         <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
       </button>
 
-      <button class="switch-card live-switch-card" id="liveModeSwitch" type="button" role="switch" aria-checked="false" title="切換 Gemini Live 雙向串流（超低延遲；預設關閉以省額度）">
+      <button class="switch-card broadcast-switch-card" id="broadcastSwitch" type="button" role="switch" aria-checked="false" title="連續收聽新聞／演講／Podcast：每 2-3 句自動整段翻譯成中文">
         <div class="switch-meta">
-          <span class="switch-label">⚡ Live 串流</span>
-          <span class="switch-sub" id="liveModeSub">關閉（極速省額度）</span>
+          <span class="switch-label">📻 聆聽翻譯</span>
+          <span class="switch-sub" id="broadcastSub">2-3句連翻・省額度</span>
         </div>
         <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
       </button>
     </section>
 
-    <!-- Live VAD / Streaming Waveform Bar (visible while Listening is ON) -->
+    <!-- Live VAD / Streaming Waveform Bar (visible while a Scenario is ON) -->
     <div class="listen-strip" id="listenStrip">
       <div class="listen-strip-left">
         <div class="wave-bars" id="waveBars" aria-hidden="true">
@@ -136,7 +137,7 @@
           </svg>
         </div>
         <h2 class="empty-title">隨時開始口譯</h2>
-        <p class="empty-desc">按住下方按鈕說話放開即翻、點擊譯文放大給外國人看，或按 📷 拍菜單與文件直接翻譯。</p>
+        <p class="empty-desc">開啟「💬 對話」自動雙向口譯、開啟「📻 聆聽翻譯」2–3 句連翻新聞演講，或按住下方說話、點 📷 拍菜單。</p>
         <button class="demo-btn" id="emptyDemoBtn" type="button">載入示範對話</button>
       </div>
     </main>
@@ -273,22 +274,31 @@
         </div>
 
         <div class="field-group">
-          <label class="field-label" for="silenceSelect">聆聽模式自動斷句速度（方案 A）</label>
+          <label class="field-label" for="silenceSelect">對話模式停頓斷句速度（標準模式）</label>
           <select id="silenceSelect" class="select-control">
-            <option value="650">極速（停頓 0.65 秒送出，反應最快）</option>
-            <option value="850" selected>快速（停頓 0.85 秒送出，推薦預設）</option>
-            <option value="1300">標準（停頓 1.3 秒送出）</option>
-            <option value="1800">從容（停頓 1.8 秒送出，適合講話較慢）</option>
+            <option value="600">極速（停頓 0.6 秒送出，反應最快）</option>
+            <option value="750" selected>快速（停頓 0.75 秒送出，推薦預設）</option>
+            <option value="1100">標準（停頓 1.1 秒送出）</option>
+            <option value="1600">從容（停頓 1.6 秒送出，適合講話較慢）</option>
           </select>
+          <span class="field-hint">開啟右上角 <strong>⚡ Turbo</strong> 時會自動縮短停頓並啟用雙路並行快翻，嚴格控制在 2x 額度上限內；「📻 聆聽翻譯」會自動累積 2–3 句再翻。</span>
         </div>
 
+        <label class="setting-row">
+          <span>
+            <strong style="display:block;font-size:13.5px;">進階：對話模式改用 Gemini Live 語音串流</strong>
+            <span class="field-hint">最低延遲原生語音串流，但耗額度超過 Turbo 的 2x 上限（預設關閉；「聆聽翻譯」一律使用省額度連翻）</span>
+          </span>
+          <input type="checkbox" id="useLiveInDialogueCheck" />
+        </label>
+
         <div class="field-group">
-          <label class="field-label" for="liveModelSelect">⚡ Live 串流模式模型（雙向 WebSocket）</label>
+          <label class="field-label" for="liveModelSelect">Gemini Live 進階模型（僅開啟上方選項時使用）</label>
           <select id="liveModelSelect" class="select-control">
             <option value="gemini-3.8-live">Gemini 3.8 Live（推薦・最新超低延遲原生語音）</option>
             <option value="gemini-3.1-flash-live-preview">Gemini 3.1 Flash Live（備用・高速即時串流）</option>
           </select>
-          <span class="field-hint">僅在開啟主畫面「⚡ Live 串流」開關時啟用；連續靜音 5 分鐘會自動斷線省額度。</span>
+          <span class="field-hint">連續靜音 5 分鐘會自動斷線省額度。</span>
         </div>
 
         <div class="field-group">
@@ -354,6 +364,6 @@
   <!-- Toast -->
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="./app.js?v=2.5"></script>
+  <script type="module" src="./app.js?v=2.6"></script>
 </body>
 </html>

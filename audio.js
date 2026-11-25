@@ -206,10 +206,14 @@ export class AudioEngine {
     this.muteUntil = 0;
 
     this.vadThreshold = 0.018;
-    this.silenceMs = 850;
-    this.minSpeechMs = 420;
-    this.maxChunkMs = 14000;
-    this.preRollMs = 420;
+    this.vadMode = 'dialogue'; // 'dialogue' (turn-based bidirectional) | 'broadcast' (2-3 sentence continuous news/lecture)
+    this.silenceMs = 750;
+    this.minBatchMs = 9000;
+    this.interSentencePauseMs = 420;
+    this.minSpeechMs = 400;
+    this.maxChunkMs = 12000;
+    this.preRollMs = 400;
+    this.uploadSampleRate = PLAN_A_SAMPLE_RATE;
 
     this.preRollChunks = [];
     this.preRollSamples = 0;
@@ -218,6 +222,7 @@ export class AudioEngine {
     this.isSpeaking = false;
     this.speechStartTs = 0;
     this.lastVoiceTs = 0;
+    this._lastProgressTs = 0;
 
     this.manualChunks = [];
     this.manualSamples = 0;
@@ -232,6 +237,7 @@ export class AudioEngine {
     this.onLevel = null; // (rms, activeState) => void
     this.onVadSegment = null; // (wavPayload) => void
     this.onVadStateChange = null; // (speaking: boolean) => void
+    this.onCaptureProgress = null; // (durationSec: number) => void
 
     // Dedicated speaker playback state (decoupled from getUserMedia)
     this.playCtx = null;
@@ -329,9 +335,24 @@ export class AudioEngine {
     } catch (_) {}
   }
 
-  configureVad({ threshold, silenceMs }) {
+  configureVad({
+    threshold,
+    silenceMs,
+    mode,
+    minBatchMs,
+    interSentencePauseMs,
+    maxChunkMs,
+    uploadSampleRate,
+  } = {}) {
     if (typeof threshold === 'number') this.vadThreshold = threshold;
     if (typeof silenceMs === 'number') this.silenceMs = silenceMs;
+    if (mode === 'dialogue' || mode === 'broadcast') this.vadMode = mode;
+    if (typeof minBatchMs === 'number') this.minBatchMs = minBatchMs;
+    if (typeof interSentencePauseMs === 'number') this.interSentencePauseMs = interSentencePauseMs;
+    if (typeof maxChunkMs === 'number') this.maxChunkMs = maxChunkMs;
+    if (typeof uploadSampleRate === 'number' && uploadSampleRate >= 8000) {
+      this.uploadSampleRate = uploadSampleRate;
+    }
   }
 
   async ensureMicrophone() {
@@ -501,7 +522,7 @@ export class AudioEngine {
     this.releaseMicrophoneIfIdle();
 
     if (chunks.length === 0) return null;
-    const wav = encodeWavMono(chunks, sampleRate, PLAN_A_SAMPLE_RATE);
+    const wav = encodeWavMono(chunks, sampleRate, this.uploadSampleRate || PLAN_A_SAMPLE_RATE);
     if (!wav || wav.durationSec < 0.25) return null;
     return wav;
   }
@@ -518,6 +539,7 @@ export class AudioEngine {
     this.preRollSamples = 0;
     this.activeChunks = [];
     this.activeSamples = 0;
+    this._lastProgressTs = 0;
     if (this.isSpeaking) {
       this.isSpeaking = false;
       if (this.onVadStateChange) this.onVadStateChange(false);
@@ -596,6 +618,7 @@ export class AudioEngine {
         this.isSpeaking = true;
         this.speechStartTs = now;
         this.lastVoiceTs = now;
+        this._lastProgressTs = now;
         this.activeChunks = this.preRollChunks.slice();
         this.activeSamples = this.preRollSamples;
         this.preRollChunks = [];
@@ -620,24 +643,62 @@ export class AudioEngine {
     const silenceElapsed = now - this.lastVoiceTs;
     const totalElapsed = now - this.speechStartTs;
 
-    if (silenceElapsed >= this.silenceMs || totalElapsed >= this.maxChunkMs) {
-      this._emitVadSegment(false);
+    if (this.onCaptureProgress && now - this._lastProgressTs >= 500) {
+      this._lastProgressTs = now;
+      this.onCaptureProgress(Math.max(1, Math.round(totalElapsed / 1000)));
+    }
+
+    if (this.vadMode === 'broadcast') {
+      // Continuous News / Lecture Mode (2–3 sentences per batch):
+      // - Wait until minBatchMs (~9s std / ~4.5s Turbo) then cut cleanly on the next short sentence pause
+      // - If speaker genuinely stops talking for silenceMs (~1.7s std / ~1.05s Turbo), flush immediately
+      // - If speaker talks non-stop up to maxChunkMs (~17.5s std / ~9.5s Turbo), force seamless overlap cut
+      const hitBatchBoundary = totalElapsed >= this.minBatchMs && silenceElapsed >= this.interSentencePauseMs;
+      const hitFullStop = silenceElapsed >= this.silenceMs;
+      const hitMaxCap = totalElapsed >= this.maxChunkMs;
+
+      if (hitBatchBoundary || hitFullStop || hitMaxCap) {
+        this._emitVadSegment(false, hitMaxCap);
+      }
+    } else {
+      // Dialogue Mode (turn-based bidirectional conversation):
+      // - Crisp cut on natural turn pause (silenceMs: ~750ms std / ~480ms Turbo)
+      // - Or clean overlap cut if someone gives a long monologue (>maxChunkMs)
+      const hitMaxCap = totalElapsed >= this.maxChunkMs;
+      if (silenceElapsed >= this.silenceMs || hitMaxCap) {
+        this._emitVadSegment(false, hitMaxCap);
+      }
     }
   }
 
-  _emitVadSegment(force) {
+  _emitVadSegment(force, seamlessCarry = false) {
     const sampleRate = this.ctx ? this.ctx.sampleRate : 48000;
     const chunks = this.activeChunks;
     const speechDurationMs = (this.activeSamples / sampleRate) * 1000;
 
+    // Preserve ~120ms tail into preRoll when cutting mid-speech (news anchor talking non-stop) so zero syllables drop
+    let tailChunks = [];
+    let tailSamples = 0;
+    if (seamlessCarry && chunks.length > 0) {
+      const targetTail = Math.round(0.12 * sampleRate);
+      for (let i = chunks.length - 1; i >= 0 && tailSamples < targetTail; i--) {
+        tailChunks.unshift(chunks[i]);
+        tailSamples += chunks[i].length;
+      }
+    }
+
     this._resetVadBuffers();
+    if (tailChunks.length > 0) {
+      this.preRollChunks = tailChunks;
+      this.preRollSamples = tailSamples;
+    }
 
     const minMs = force ? 280 : this.minSpeechMs;
     if (chunks.length === 0 || speechDurationMs < minMs) {
       return false;
     }
 
-    const wav = encodeWavMono(chunks, sampleRate, PLAN_A_SAMPLE_RATE);
+    const wav = encodeWavMono(chunks, sampleRate, this.uploadSampleRate || PLAN_A_SAMPLE_RATE);
     if (wav && this.onVadSegment) {
       this.onVadSegment(wav);
       return true;
