@@ -2,7 +2,7 @@
  * app.js — Main UI controller for 隨身口譯官 PWA
  */
 
-import { AudioEngine } from './audio.js?v=2.8.1';
+import { AudioEngine } from './audio.js?v=3.0';
 import {
   TARGET_LANGUAGES,
   ICEBREAKER_BANNERS,
@@ -13,8 +13,8 @@ import {
   translateImageWithGemini,
   synthesizeGeminiSpeech,
   testApiKey,
-} from './gemini.js?v=2.8.1';
-import { GeminiLiveClient } from './live.js?v=2.8.1';
+} from './gemini.js?v=3.0';
+import { GeminiLiveClient } from './live.js?v=3.0';
 
 const STORAGE_KEYS = {
   settings: 'pt_settings_v1',
@@ -658,12 +658,15 @@ function updateSwitchUI() {
     els.toneQuickBtn.classList.toggle('polite', settings.tone === 'polite');
   }
 
-  // Target language pills & outbound button label
-  els.langBar.querySelectorAll('.lang-pill').forEach((btn) => {
+  // Target language pills (Apple spring sliding indicator) & outbound button label
+  let activeLangIdx = 0;
+  els.langBar.querySelectorAll('.lang-pill').forEach((btn, idx) => {
     const isActive = btn.dataset.lang === settings.targetLang;
+    if (isActive) activeLangIdx = idx;
     btn.classList.toggle('active', isActive);
     btn.setAttribute('aria-pressed', String(isActive));
   });
+  els.langBar.dataset.activeIndex = String(activeLangIdx);
 
   els.quickChineseInput.placeholder = `輸入中文或外語，自動互譯（中文 ↔ ${langInfo.label}）⋯`;
   if (!isManualRecording) {
@@ -893,6 +896,7 @@ function appendMessageCard(msg, forceScroll = false) {
   }
 
   const card = createMessageCard(msg);
+  card.classList.add('bubble-enter');
   const anchor =
     document.getElementById('liveDraftCard') ||
     document.getElementById('liveStreamingCard') ||
@@ -950,6 +954,27 @@ const FLAG_SVG_MAP = {
   ja: `<svg class="flag-svg sm" viewBox="0 0 24 16" aria-hidden="true"><rect width="24" height="16" rx="2" fill="#FFFFFF"/><circle cx="12" cy="8" r="4.6" fill="#BC002D"/></svg>`,
   sv: `<svg class="flag-svg sm" viewBox="0 0 24 16" aria-hidden="true"><rect width="24" height="16" rx="2" fill="#006AA7"/><rect x="7" width="3.2" height="16" fill="#FECC00"/><rect y="6.4" width="24" height="3.2" fill="#FECC00"/></svg>`,
 };
+
+/**
+ * XSS-safe DOM helper: renders a trusted static flag SVG (if known) plus plain textContent spans.
+ * Never interpolates dynamic or model-generated strings into innerHTML.
+ */
+function renderFlagLabel(container, { prefix = '', flagCode = '', text = '' }) {
+  container.textContent = '';
+  if (prefix) {
+    container.appendChild(document.createTextNode(prefix));
+  }
+  const svgMarkup = Object.prototype.hasOwnProperty.call(FLAG_SVG_MAP, flagCode) ? FLAG_SVG_MAP[flagCode] : '';
+  if (svgMarkup) {
+    const slot = document.createElement('span');
+    slot.className = 'flag-slot';
+    slot.innerHTML = svgMarkup;
+    container.appendChild(slot);
+  }
+  const labelSpan = document.createElement('span');
+  labelSpan.textContent = text;
+  container.appendChild(labelSpan);
+}
 
 const SPEAKER_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path class="sp-wave-1" d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path class="sp-wave-2" d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
 
@@ -1030,19 +1055,17 @@ function createMessageCard(msg) {
   if (isPhoto) {
     if (msg.isSourceChinese) {
       const targetInfo = TARGET_LANGUAGES[msg.targetLang] || TARGET_LANGUAGES.en;
-      langTag.innerHTML = `中 → ${FLAG_SVG_MAP[targetInfo.code] || ''}<span>${targetInfo.label}</span>`;
+      renderFlagLabel(langTag, { prefix: '中 → ', flagCode: targetInfo.code, text: targetInfo.label });
     } else {
-      const shortLang = LANG_BADGE_MAP[msg.lang] || (msg.lang || '外語').toUpperCase();
-      langTag.innerHTML = `${FLAG_SVG_MAP[msg.lang] || ''}<span>${shortLang} → 中文</span>`;
+      const shortLang = LANG_BADGE_MAP[msg.lang] || String(msg.lang || '外語').toUpperCase();
+      renderFlagLabel(langTag, { flagCode: msg.lang, text: `${shortLang} → 中文` });
     }
   } else if (isOutbound) {
     const targetInfo = TARGET_LANGUAGES[msg.targetLang] || TARGET_LANGUAGES.en;
-    const flagHtml = FLAG_SVG_MAP[targetInfo.code] || '';
-    langTag.innerHTML = `中 → ${flagHtml}<span>${targetInfo.label}</span>`;
+    renderFlagLabel(langTag, { prefix: '中 → ', flagCode: targetInfo.code, text: targetInfo.label });
   } else if (!msg.isChinese) {
-    const shortLang = LANG_BADGE_MAP[msg.lang] || msg.lang.toUpperCase();
-    const flagHtml = FLAG_SVG_MAP[msg.lang] || '';
-    langTag.innerHTML = `${flagHtml}<span>${shortLang} → 中文</span>`;
+    const shortLang = LANG_BADGE_MAP[msg.lang] || String(msg.lang || '外語').toUpperCase();
+    renderFlagLabel(langTag, { flagCode: msg.lang, text: `${shortLang} → 中文` });
   } else {
     langTag.textContent = '中文';
   }
@@ -2929,6 +2952,14 @@ function compressImageFile(file, maxDim = 1280, quality = 0.82) {
 
 async function handlePhotoFileSelected(file) {
   if (!file) return;
+  if (file.type && !file.type.startsWith('image/')) {
+    showToast('請選擇圖片檔案（JPG／PNG／WebP）');
+    return;
+  }
+  if (typeof file.size === 'number' && file.size > 25 * 1024 * 1024) {
+    showToast('圖片檔案過大（上限 25 MB），請重新拍攝或選擇較小照片');
+    return;
+  }
   if (!settings.apiKey) {
     showToast('請先填入 Gemini API Key 才能使用拍照翻譯');
     openSettings();
@@ -2997,10 +3028,9 @@ function openShowcard(msg) {
   const isOutbound = msg.direction === 'outbound';
   const displayLang = isOutbound ? msg.targetLang : 'zh';
   const bannerText = ICEBREAKER_BANNERS[displayLang] || ICEBREAKER_BANNERS.en;
-  const flagHtml = FLAG_SVG_MAP[displayLang] || '';
 
   if (els.showcardBanner) {
-    els.showcardBanner.innerHTML = `${flagHtml}<span>${bannerText}</span>`;
+    renderFlagLabel(els.showcardBanner, { flagCode: displayLang, text: bannerText });
   }
   els.showcardMain.textContent = isOutbound ? msg.translated : msg.zh;
   els.showcardReading.textContent = isOutbound && msg.reading ? msg.reading : '';
@@ -3047,6 +3077,9 @@ function openSettings() {
 }
 
 function closeSettings() {
+  // Always re-mask API Key input when closing settings so it never stays exposed in plaintext
+  if (els.apiKeyInput) els.apiKeyInput.type = 'password';
+  if (els.toggleKeyVisibility) els.toggleKeyVisibility.textContent = '顯示';
   els.settingsSheet.classList.remove('open');
   els.settingsSheet.setAttribute('aria-hidden', 'true');
 }
@@ -3153,7 +3186,7 @@ async function exportTranscript() {
     a.href = url;
     a.download = `broadcast-zh-${new Date().toISOString().slice(0, 10)}.txt`;
     a.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
     showToast('已下載純中文譯文檔');
     return;
   }
@@ -3178,7 +3211,7 @@ async function exportTranscript() {
     if (m.isChinese) {
       return `[${m.time}] ${sp}: ${m.zh}`;
     }
-    const shortLang = LANG_BADGE_MAP[m.lang] || m.lang.toUpperCase();
+    const shortLang = LANG_BADGE_MAP[m.lang] || String(m.lang || '外語').toUpperCase();
     return `[${m.time}] ${sp} (${shortLang}→中): ${m.zh}\n    原文：${m.original}`;
   });
 
@@ -3197,7 +3230,7 @@ async function exportTranscript() {
   a.href = url;
   a.download = `translator-log-${new Date().toISOString().slice(0, 10)}.txt`;
   a.click();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
   showToast('已下載文字紀錄檔');
 }
 

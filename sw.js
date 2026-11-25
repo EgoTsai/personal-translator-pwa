@@ -1,12 +1,12 @@
-const CACHE_NAME = 'personal-translator-v2.8.1';
+const CACHE_NAME = 'personal-translator-v3.0';
 const APP_SHELL = [
   './',
   './index.html',
-  './styles.css?v=2.8.1',
-  './app.js?v=2.8.1',
-  './audio.js?v=2.8.1',
-  './gemini.js?v=2.8.1',
-  './live.js?v=2.8.1',
+  './styles.css?v=3.0',
+  './app.js?v=3.0',
+  './audio.js?v=3.0',
+  './gemini.js?v=3.0',
+  './live.js?v=3.0',
   './manifest.json',
   './icon.svg',
   './icon-192.png',
@@ -31,8 +31,8 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  // Never intercept Gemini API or non-GET calls
-  if (event.request.method !== 'GET' || url.hostname.includes('googleapis.com')) {
+  // Strictly skip non-GET and ALL cross-origin requests (Gemini API, fonts, etc.)
+  if (event.request.method !== 'GET' || url.origin !== self.location.origin) {
     return;
   }
 

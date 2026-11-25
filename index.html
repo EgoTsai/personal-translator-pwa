@@ -3,9 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' https://generativelanguage.googleapis.com wss://generativelanguage.googleapis.com; object-src 'none'; base-uri 'self'; form-action 'none';"
+  />
+  <meta name="referrer" content="strict-origin-when-cross-origin" />
   <title>隨身口譯官 — 英・日・瑞典 ↔ 中文專屬語音翻譯</title>
   <meta name="description" content="使用 Google Gemini API 的個人專屬手機即時口譯官，支援英、日、瑞典語與繁體中文雙向語音翻譯、說話者標註與 AI 真人朗讀。" />
-  <meta name="theme-color" content="#0F5C5C" />
+  <meta name="theme-color" content="#0A7D79" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="隨身口譯官" />
@@ -16,7 +21,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=2.8.1" />
+  <link rel="stylesheet" href="./styles.css?v=3.0" />
 </head>
 <body>
   <div class="app-shell" id="appShell">
@@ -28,7 +33,7 @@
           <div class="brand-text">
             <div class="brand-title-row" style="display:flex;align-items:center;gap:5px;white-space:nowrap;">
               <h1 class="brand-title">隨身口譯官</h1>
-              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v2.8.1</button>
+              <button type="button" class="version-badge" id="versionBadge" title="點擊檢查並重新載入最新版本">v3.0</button>
             </div>
             <div class="status-line">
               <span class="status-dot ready" id="statusDot"></span>
@@ -55,9 +60,10 @@
         </div>
       </div>
 
-      <!-- Counterpart Language Switcher -->
-      <nav class="lang-bar" id="langBar" aria-label="對方語言選擇">
-        <button class="lang-pill active" type="button" data-lang="en">
+      <!-- Counterpart Language Switcher (Apple Sliding Segmented Pill) -->
+      <nav class="lang-bar" id="langBar" data-active-index="0" aria-label="對方語言選擇">
+        <span class="lang-slider" id="langSlider" aria-hidden="true"></span>
+        <button class="lang-pill active" type="button" data-lang="en" aria-pressed="true">
           <svg class="flag-svg" viewBox="0 0 24 16" aria-hidden="true">
             <rect width="24" height="16" rx="2" fill="#B22234"/>
             <path d="M0 2.5h24M0 5h24M0 7.5h24M0 10h24M0 12.5h24M0 15h24" stroke="#FFF" stroke-width="1.25"/>
@@ -235,7 +241,7 @@
               id="apiKeyInput"
               class="text-control"
               placeholder="AIzaSy..."
-              autocomplete="off"
+              autocomplete="new-password"
               spellcheck="false"
             />
             <button class="btn-secondary" id="testKeyBtn" type="button">測試連線</button>
@@ -247,7 +253,7 @@
         <details class="guide-details">
           <summary>如何領取 Google AI Pro 每月 $10 免費 API 額度？</summary>
           <ol>
-            <li>用訂閱 Google AI Pro 的主帳號登入 <a href="https://aistudio.google.com/" target="_blank" rel="noopener">Google AI Studio</a>。</li>
+            <li>用訂閱 Google AI Pro 的主帳號登入 <a href="https://aistudio.google.com/" target="_blank" rel="noopener noreferrer">Google AI Studio</a>。</li>
             <li>點左下角選單的 <strong>Claim free API credits / Redeem credits</strong>，依引導綁定 Cloud Billing 帳單帳戶並勾選自動套用未來每月贈送額度（新預付帳戶需預存 $5 啟用，系統會優先扣除免費贈送額度，也可設定每月花費上限）。</li>
             <li>在左側 <strong>API keys</strong> 建立並複製你的付費 API Key，貼回上方即可使用！每月 $10 額度單月未用完可累計保留 12 個月。</li>
           </ol>
@@ -400,6 +406,6 @@
   <!-- Toast -->
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="./app.js?v=2.8.1"></script>
+  <script type="module" src="./app.js?v=3.0"></script>
 </body>
 </html>

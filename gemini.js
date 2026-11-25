@@ -63,6 +63,19 @@ export const ICEBREAKER_BANNERS = {
   zh: '隨身 AI 口譯官',
 };
 
+export function sanitizeLangCode(raw, fallback = 'unknown') {
+  const clean = String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '')
+    .slice(0, 8);
+  return clean || fallback;
+}
+
+function redactSecrets(text) {
+  return String(text || '').replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED]');
+}
+
 function friendlyApiError(status, bodyText) {
   let detail = '';
   try {
@@ -71,6 +84,7 @@ function friendlyApiError(status, bodyText) {
   } catch (_) {
     detail = bodyText || '';
   }
+  detail = redactSecrets(detail).slice(0, 260);
 
   if (status === 400 && /API key not valid/i.test(detail)) {
     return new Error('API Key 無效，請確認是否完整複製自 Google AI Studio。');
@@ -563,7 +577,7 @@ Rules:
     let translated = String(u.translated_text || u.translated || u.chinese_translation || '').trim();
     if (!original && !translated) continue;
 
-    const sourceLang = String(u.source_lang || u.lang || 'unknown').trim().toLowerCase().slice(0, 8);
+    const sourceLang = sanitizeLangCode(u.source_lang || u.lang, 'unknown');
     const dirRaw = String(u.direction || '').trim().toLowerCase();
     const isOutbound = dirRaw === 'outbound' || (dirRaw !== 'inbound' && sourceLang.startsWith('zh'));
 
@@ -1049,7 +1063,7 @@ export async function interpretListeningAudio({
               onStream({
                 direction: 'inbound',
                 speaker: speaker.toUpperCase().slice(0, 4) || 'A',
-                lang: lang.toLowerCase().slice(0, 8),
+                lang: sanitizeLangCode(lang, ''),
                 mainText: zh || original,
                 subText: zh && original && original !== zh ? original : '',
               });
@@ -1069,7 +1083,7 @@ export async function interpretListeningAudio({
     let zh = String(u.chinese_translation || u.zh || '').trim();
     if (!original && !zh) continue;
 
-    const lang = String(u.lang || 'unknown').trim().toLowerCase().slice(0, 8);
+    const lang = sanitizeLangCode(u.lang, 'unknown');
     const isChinese = Boolean(u.is_chinese) || lang.startsWith('zh');
 
     if (!isChinese && looksUntranslatedForZh(zh, original, lang)) {
@@ -1242,7 +1256,7 @@ Output strict JSON only.`;
     return null;
   }
 
-  const sourceLang = String(parsed.source_lang || 'zh').trim().toLowerCase().slice(0, 8);
+  const sourceLang = sanitizeLangCode(parsed.source_lang, 'zh');
   const isSourceChinese = sourceLang.startsWith('zh');
   const resolvedTargetLang = isSourceChinese ? langInfo.code : 'zh';
   const sourceText = String(parsed.source_text || textInput || '').trim();
@@ -1428,7 +1442,7 @@ export async function translateImageWithGemini({
 
   if (!parsed) return null;
 
-  const sourceLang = String(parsed.source_lang || 'en').trim().toLowerCase().slice(0, 8);
+  const sourceLang = sanitizeLangCode(parsed.source_lang, 'en');
   const isSourceChinese = sourceLang.startsWith('zh');
   const resolvedTargetLang = isSourceChinese ? langInfo.code : 'zh';
   const items = Array.isArray(parsed.items)
